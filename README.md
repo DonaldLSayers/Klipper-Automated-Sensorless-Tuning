@@ -46,13 +46,16 @@ Optional parameters:
 | Param | Default | Meaning |
 |---|---|---|
 | `AXIS` | last char of `STEPPER` | Axis letter to home (`x`/`y`/`z`) |
-| `SGT_MIN` / `SGT_MAX` | driver-dependent | Sweep range for the stall-sensitivity field. `-64`/`63` for signed `sgt` drivers (tmc2130/2660/5160/2240), `0`/`255` for unsigned `sg4_thrs` drivers (tmc2208/2209/2226) |
+| `SGT_MIN` / `SGT_MAX` | see below | Sweep range for the stall-sensitivity field |
+| `SGT_RADIUS` | `16` (config `sgt_radius`) | If `driver_SGT`/`driver_SGTHRS` is already set in printer.cfg, the default sweep range is that value +/- this, not the driver's full range |
 | `SGT_STEP` | `8` (config `sgt_step`) | Step size across the sweep |
 | `SAMPLES` | `5` (config `samples`) | Homing attempts per candidate |
 | `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep homing current (amps) over this range |
 | `CURRENT_STEP` | `0.1` | Step size for the current sweep |
 | `HOMING_SPEED_MIN` / `HOMING_SPEED_MAX` | unset | Also sweep homing speed (mm/s) over this range |
 | `HOMING_SPEED_STEP` | `5.0` | Step size for the speed sweep |
+
+The default SGT range is centered on whatever's already in printer.cfg, not the driver's full theoretical range (`-64` to `63` for signed `sgt`, `0` to `255` for unsigned `sg4_thrs`). Sweeping the full range means testing much harsher settings than the printer's ever actually seen, worse mechanical impacts, more wear, more noise, for no real benefit if a roughly-working value already exists. If `driver_SGT`/`driver_SGTHRS` isn't set yet (a fresh printer with no baseline), KAST falls back to the full range, since there's nothing to center on. Pass `SGT_MIN`/`SGT_MAX` explicitly to override either way.
 
 StallGuard sensitivity is velocity-dependent, an SGT that's reliable at one homing speed may not be at another. So if you care about a specific `homing_speed`, it's worth sweeping SGT at that speed rather than assuming a value tuned elsewhere carries over. Sweeping all three dimensions (SGT x current x speed) multiplies trial count fast, KAST prints an estimated homing-move count before starting so you know what you're in for.
 

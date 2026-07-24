@@ -93,6 +93,23 @@ class KASTDriverAdapter:
         self.config_key = CONFIG_KEY_BY_DRIVER[self.driver_type]
         self.sgt_range = SGT_RANGE_BY_DRIVER[self.driver_type]
 
+    def get_configured_sgt(self):
+        """Returns the SGT value currently sitting in printer.cfg for
+        this driver, or None if it was never set (e.g. still at the
+        module's own default). Used to center the default sweep range
+        on a known-working value instead of blindly walking the full
+        theoretical range, which can mean testing much harsher
+        settings than the printer has ever actually seen."""
+        configfile = self.printer.lookup_object('configfile')
+        section = configfile.status_settings_dict.get(self.driver_name, {})
+        val = section.get(self.config_key.lower())
+        if val is None:
+            return None
+        try:
+            return int(float(val))
+        except (TypeError, ValueError):
+            return None
+
     def _find_driver(self):
         for driver_type in SGT_FIELD_BY_DRIVER:
             full_name = "%s %s" % (driver_type, self.stepper_name)
@@ -354,6 +371,7 @@ class KAST:
         self.accel = KASTAccelHelper(self.printer, accel_chip)
         self.default_samples = config.getint('samples', 5, minval=1)
         self.default_sgt_step = config.getint('sgt_step', 8, minval=1)
+        self.default_sgt_radius = config.getint('sgt_radius', 16, minval=1)
         self.results_dir = os.path.expanduser(
             config.get('results_dir', '~/printer_data/config/kast_results'))
         self.enable_plots = config.getboolean('enable_plots', True)
@@ -456,12 +474,24 @@ class KAST:
 
         tuner = KASTStepperTuner(self, stepper_name, axis, config_section=None)
 
-        # Default sweep range depends on the driver's SGT field: signed
-        # -64..63 for tmc2130/2660/5160/2240 ("sgt"), unsigned 0..255
-        # for tmc2208/2209/2226 ("sg4_thrs").
+        # Default sweep range: centered on whatever SGT is currently
+        # configured, not the driver's full theoretical range. KAST is
+        # meant to refine a value that already roughly works, not
+        # blindly explore -64..63 (or 0..255), which can mean testing
+        # far harsher settings than the printer has ever actually seen
+        # and hitting the hard stops much harder than necessary.
+        # SGT_MIN/SGT_MAX/SGT_RADIUS all override this if given.
         range_min, range_max = tuner.driver.sgt_range
-        sgt_min = gcmd.get_int('SGT_MIN', range_min)
-        sgt_max = gcmd.get_int('SGT_MAX', range_max)
+        current_sgt = tuner.driver.get_configured_sgt()
+        if current_sgt is not None:
+            radius = gcmd.get_int('SGT_RADIUS', self.default_sgt_radius,
+                                   minval=1)
+            default_min = max(range_min, current_sgt - radius)
+            default_max = min(range_max, current_sgt + radius)
+        else:
+            default_min, default_max = range_min, range_max
+        sgt_min = gcmd.get_int('SGT_MIN', default_min)
+        sgt_max = gcmd.get_int('SGT_MAX', default_max)
 
         if current_min is not None and current_max is not None:
             currents = []
@@ -485,10 +515,10 @@ class KAST:
             ((sgt_max - sgt_min) // sgt_step + 1)
             * len(currents) * len(homing_speeds) * samples)
         gcmd.respond_info(
-            "KAST: about to run ~%d homing moves for '%s'. This can take "
-            "a while and will heat up the motor -- interrupt with an "
-            "emergency stop if something looks wrong."
-            % (total_trials, stepper_name))
+            "KAST: sweeping SGT %d..%d for '%s' (~%d homing moves). This "
+            "can take a while and will heat up the motor -- interrupt "
+            "with an emergency stop if something looks wrong."
+            % (sgt_min, sgt_max, stepper_name, total_trials))
 
         best, all_results = tuner.search(
             sgt_min, sgt_max, sgt_step, currents, homing_speeds, samples)
