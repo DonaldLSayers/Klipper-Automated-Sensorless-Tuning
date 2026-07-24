@@ -358,24 +358,33 @@ class KASTStepperTuner:
         return results
 
     def walk_from_baseline(self, baseline_sgt, sgt_min, sgt_max, sgt_step,
-                            current, homing_speed, samples, max_drift):
-        """Tests baseline_sgt first to establish a trustworthy reference
-        position, then steps one sgt_step at a time away from it in
-        each direction the [sgt_min, sgt_max] range actually covers,
+                            current, homing_speed, samples):
+        """Tests baseline_sgt first (it should already be known-reliable),
+        then steps one sgt_step at a time away from it in each
+        direction the [sgt_min, sgt_max] range actually covers,
         stopping in that direction the moment a step isn't fully
-        reliable or its homed position drifts from the reference by
-        more than max_drift. This bounds exploration to only as far
-        as the printer actually keeps working reliably, instead of
-        committing to a fixed range regardless of what happens along
-        the way -- important because a value that's briefly unreliable
-        (e.g. a false StallGuard trigger) can otherwise compound into
-        real physical drift over the following trials."""
+        reliable. This bounds exploration to only as far as the
+        printer actually keeps working, instead of committing to a
+        fixed range regardless of what happens along the way.
+
+        Note what this can and can't catch: it stops on a step that
+        fails outright (samples come back short or erroring). It
+        CANNOT detect a step that "succeeds" via a false/early
+        StallGuard trigger, because Klipper reports the same
+        configured position_endstop value for any triggered G28
+        regardless of whether the trigger was real, there's nothing
+        in that reported position for this method to compare. That
+        failure mode is caught separately, in the homing macro itself
+        (macros/kast.cfg's min_home_travel check), which measures
+        actual physical movement before/after G28 rather than relying
+        on Klipper's reported position, and aborts the whole
+        calibration immediately if a move looks too short to be real.
+        """
         results = []
         baseline = self.trial(baseline_sgt, current, homing_speed, samples)
         results.append(baseline)
-        if baseline['success_rate'] < 1.0 or baseline['mean_pos'] is None:
+        if baseline['success_rate'] < 1.0:
             return results
-        reference_pos = baseline['mean_pos']
 
         for direction in (-1, 1):
             sgt = baseline_sgt + direction * sgt_step
@@ -384,14 +393,11 @@ class KASTStepperTuner:
                 results.append(r)
                 if r['success_rate'] < 1.0:
                     break
-                if (r['mean_pos'] is not None
-                        and abs(r['mean_pos'] - reference_pos) > max_drift):
-                    break
                 sgt += direction * sgt_step
         return results
 
     def search(self, sgt_min, sgt_max, sgt_step, currents, homing_speeds,
-               samples, baseline_sgt=None, max_drift=2.0):
+               samples, baseline_sgt=None):
         """Searches SGT for each candidate current/speed combination;
         returns the best overall result plus the full result table.
         Walks incrementally from baseline_sgt if given (see
@@ -405,7 +411,7 @@ class KASTStepperTuner:
                     if baseline_sgt is not None:
                         all_results.extend(self.walk_from_baseline(
                             baseline_sgt, sgt_min, sgt_max, sgt_step,
-                            current, homing_speed, samples, max_drift))
+                            current, homing_speed, samples))
                     else:
                         all_results.extend(
                             self.sweep(sgt_min, sgt_max, sgt_step, current,
@@ -433,8 +439,6 @@ class KAST:
         self.default_samples = config.getint('samples', 5, minval=1)
         self.default_sgt_step = config.getint('sgt_step', 8, minval=1)
         self.default_sgt_radius = config.getint('sgt_radius', 16, minval=1)
-        self.default_max_drift = config.getfloat(
-            'max_position_drift', 2.0, above=0.0)
         self.results_dir = os.path.expanduser(
             config.get('results_dir', '~/printer_data/config/kast_results'))
         self.enable_plots = config.getboolean('enable_plots', True)
@@ -529,8 +533,6 @@ class KAST:
         speed_min = gcmd.get_float('HOMING_SPEED_MIN', None, above=0.0)
         speed_max = gcmd.get_float('HOMING_SPEED_MAX', None, above=0.0)
         speed_step = gcmd.get_float('HOMING_SPEED_STEP', 5.0, above=0.0)
-        max_drift = gcmd.get_float('MAX_DRIFT', self.default_max_drift,
-                                    above=0.0)
 
         if self.fun_mode:
             gcmd.respond_info(
@@ -610,7 +612,7 @@ class KAST:
         try:
             best, all_results = tuner.search(
                 sgt_min, sgt_max, sgt_step, currents, homing_speeds,
-                samples, baseline_sgt=current_sgt, max_drift=max_drift)
+                samples, baseline_sgt=current_sgt)
         except KASTUnsafeAbort as e:
             raise gcmd.error(
                 "KAST_CALIBRATE stopped: %s\nNothing further was moved. "
