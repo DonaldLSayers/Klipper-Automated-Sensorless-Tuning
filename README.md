@@ -47,7 +47,7 @@ Optional parameters:
 |---|---|---|
 | `AXIS` | last char of `STEPPER` | Axis letter to home (`x`/`y`/`z`) |
 | `SGT_MIN` / `SGT_MAX` | see below | Sweep range for the stall-sensitivity field |
-| `SGT_RADIUS` | `16` (config `sgt_radius`) | If `driver_SGT`/`driver_SGTHRS` is already set in printer.cfg, the default sweep range is that value +/- this, not the driver's full range |
+| `SGT_RADIUS` | `16` (config `sgt_radius`) | How far past the currently configured SGT the default sweep explores, in the more-sensitive direction only |
 | `SGT_STEP` | `8` (config `sgt_step`) | Step size across the sweep |
 | `SAMPLES` | `5` (config `samples`) | Homing attempts per candidate |
 | `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep homing current (amps) over this range |
@@ -55,7 +55,9 @@ Optional parameters:
 | `HOMING_SPEED_MIN` / `HOMING_SPEED_MAX` | unset | Also sweep homing speed (mm/s) over this range |
 | `HOMING_SPEED_STEP` | `5.0` | Step size for the speed sweep |
 
-The default SGT range is centered on whatever's already in printer.cfg, not the driver's full theoretical range (`-64` to `63` for signed `sgt`, `0` to `255` for unsigned `sg4_thrs`). Sweeping the full range means testing much harsher settings than the printer's ever actually seen, worse mechanical impacts, more wear, more noise, for no real benefit if a roughly-working value already exists. If `driver_SGT`/`driver_SGTHRS` isn't set yet (a fresh printer with no baseline), KAST falls back to the full range, since there's nothing to center on. Pass `SGT_MIN`/`SGT_MAX` explicitly to override either way.
+If `driver_SGT`/`driver_SGTHRS` is already set in printer.cfg, the default sweep only explores toward *more* sensitive settings from there, never less. A known-working value means the printer already survives that much force, testing something harsher has no upside, only risk of a worse impact. Concretely: for signed `sgt` drivers (lower = more sensitive), the default range is `current - SGT_RADIUS` to `current`, it never defaults past `current`. For unsigned `sg4_thrs` drivers (higher = more sensitive), it's the same idea in reverse, `current` to `current + SGT_RADIUS`. Pass `SGT_MIN`/`SGT_MAX` explicitly if you deliberately want to test the harsher direction too. If `driver_SGT`/`driver_SGTHRS` isn't set yet (a fresh printer with no baseline), KAST falls back to the driver's full theoretical range, since there's nothing to anchor to yet, that first run is the one to watch closely.
+
+The same principle applies if you sweep `CURRENT_MIN`/`CURRENT_MAX`: higher current means more torque before StallGuard triggers, which generally means a harder impact. There's no automatic default here since current sweeping is opt-in, but it's worth keeping `CURRENT_MAX` at or below whatever's already working rather than pushing it higher, for the same reason as the SGT default above.
 
 StallGuard sensitivity is velocity-dependent, an SGT that's reliable at one homing speed may not be at another. So if you care about a specific `homing_speed`, it's worth sweeping SGT at that speed rather than assuming a value tuned elsewhere carries over. Sweeping all three dimensions (SGT x current x speed) multiplies trial count fast, KAST prints an estimated homing-move count before starting so you know what you're in for.
 

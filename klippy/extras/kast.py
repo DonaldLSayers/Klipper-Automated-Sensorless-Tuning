@@ -474,20 +474,27 @@ class KAST:
 
         tuner = KASTStepperTuner(self, stepper_name, axis, config_section=None)
 
-        # Default sweep range: centered on whatever SGT is currently
-        # configured, not the driver's full theoretical range. KAST is
-        # meant to refine a value that already roughly works, not
-        # blindly explore -64..63 (or 0..255), which can mean testing
-        # far harsher settings than the printer has ever actually seen
-        # and hitting the hard stops much harder than necessary.
-        # SGT_MIN/SGT_MAX/SGT_RADIUS all override this if given.
+        # Default sweep range: only explores MORE sensitive (gentler)
+        # settings than whatever's already configured, never less. A
+        # known-working value means the printer already survives that
+        # much force; there's no upside to defaulting into harsher
+        # territory, only risk. For signed "sgt" drivers, lower is more
+        # sensitive, so the default range stops AT the current value
+        # rather than going past it. For unsigned "sg4_thrs" drivers,
+        # higher is more sensitive, so it's the same idea in reverse.
+        # Pass SGT_MIN/SGT_MAX explicitly to test the harsher direction
+        # on purpose, this is only about what happens by default.
         range_min, range_max = tuner.driver.sgt_range
         current_sgt = tuner.driver.get_configured_sgt()
         if current_sgt is not None:
             radius = gcmd.get_int('SGT_RADIUS', self.default_sgt_radius,
                                    minval=1)
-            default_min = max(range_min, current_sgt - radius)
-            default_max = min(range_max, current_sgt + radius)
+            if tuner.driver.sgt_signed:
+                default_min = max(range_min, current_sgt - radius)
+                default_max = current_sgt
+            else:
+                default_min = current_sgt
+                default_max = min(range_max, current_sgt + radius)
         else:
             default_min, default_max = range_min, range_max
         sgt_min = gcmd.get_int('SGT_MIN', default_min)
