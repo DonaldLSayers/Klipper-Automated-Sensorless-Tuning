@@ -16,10 +16,8 @@ import statistics
 # TMC2130/TMC2660/TMC5160 use a signed "sgt" field (config: driver_SGT).
 # TMC2208/TMC2209/TMC2226 use an unsigned "sgthrs" field
 # (config: driver_SGTHRS).
-# TMC2240 uses StallGuard4 with an unsigned "sg4_thrs" field
-# (config: driver_SGT). NOTE: verify this field name against the
-# Klipper version in use — TMC2240 support is newer and the field
-# naming has not been tested against real hardware here.
+# TMC2240 (StallGuard4, register SG4_THRS) is also exposed as "sgt"
+# (config: driver_SGT) — confirmed against a real printer.cfg.
 SGT_FIELD_BY_DRIVER = {
     'tmc2130': 'sgt',
     'tmc2660': 'sgt',
@@ -27,7 +25,7 @@ SGT_FIELD_BY_DRIVER = {
     'tmc2208': 'sgthrs',
     'tmc2209': 'sgthrs',
     'tmc2226': 'sgthrs',
-    'tmc2240': 'sg4_thrs',
+    'tmc2240': 'sgt',
 }
 
 SGT_SIGNED_DRIVERS = ('tmc2130', 'tmc2660', 'tmc5160')
