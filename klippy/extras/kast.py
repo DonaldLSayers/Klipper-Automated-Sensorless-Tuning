@@ -250,6 +250,22 @@ class KASTStepperTuner:
         self.driver = KASTDriverAdapter(self.printer, stepper_name)
         self.accel = kast.accel
         self._speed_override = None
+        self._reset_cycle_drift_baseline()
+
+    def _reset_cycle_drift_baseline(self):
+        """macros/kast.cfg's _KAST_CHECK_CYCLE_START compares each
+        homing cycle's resting position against the previous cycle's,
+        which is only meaningful across back-to-back calls within one
+        run, not across unrelated G28s wherever the toolhead happens
+        to be. Reset the baseline at the start of every run so it
+        doesn't false-positive on normal use between runs."""
+        if self.printer.lookup_object(
+                'gcode_macro _KAST_HOMING_STATE', None) is None:
+            return
+        for var in ('last_cycle_start_x', 'last_cycle_start_y'):
+            self.gcode.run_script_from_command(
+                "SET_GCODE_VARIABLE MACRO=_KAST_HOMING_STATE "
+                "VARIABLE=%s VALUE=-99999" % var)
 
     def boop(self, sgt):
         if self.kast.fun_mode:
