@@ -7,7 +7,7 @@ If you just want the quick reference (command params, config options), see the m
 ## 0. Before you start
 
 - `install.sh` backs up your whole config folder automatically before it touches anything. If you're installing by hand instead, back up `printer.cfg` yourself first: `KAST_APPLY` writes to it via `SAVE_CONFIG`, same as any other Klipper calibration tool.
-- Be near the printer, or watching a webcam, the first few times you run a sweep. Homing over and over at aggressive settings can occasionally overshoot before KAST catches it.
+- `KAST_CALIBRATE` tests near bed center, not at the real endstop, specifically so a false trigger can't turn into a crash. `KAST_TEST` performs real, repeated `G28`s though, and deserves the same caution any repeated homing does, be near the printer or watching a webcam for those.
 - Sensorless homing tuning is inherently a bit knock-y and buzzy on the steppers. That's normal.
 - **Installing KAST changes how your printer homes.** It ships its own `[homing_override]`, which replaces any existing one entirely, not just for KAST commands, for every `G28` from then on. Before running any KAST command, send a plain `G28` by itself first, with your hand near an emergency stop, and watch it home from a cold start (Z not yet homed). Confirm the toolhead lifts before any X/Y move and doesn't hit anything, on both this and the very next `G28`, before you trust it unattended.
 
@@ -97,7 +97,7 @@ KAST_TEST STEPPER=stepper_x AXIS=x SAMPLES=10
 
 This homes X ten times at whatever `driver_SGT` and current are already configured, and reports success rate and repeatability. If it's already at 100%, great, you might not need a full sweep. If it's flaky, that's your starting point.
 
-## 6. Run a calibration sweep
+## 6. Run a calibration search
 
 Start with just SGT:
 
@@ -105,9 +105,9 @@ Start with just SGT:
 KAST_CALIBRATE STEPPER=stepper_x AXIS=x
 ```
 
-KAST will print an estimated number of homing moves before it starts (worth glancing at, a wide sweep with high SAMPLES can take a while). It homes repeatedly across the SGT range, and if an ADXL345 is set up, folds in vibration data too.
+This does not home for real. It moves the axis to bed center and tests short back-and-forth moves there instead, well clear of any hard stop, so a false StallGuard trigger just stops that test move short and gets logged, not a crash. It starts from whatever SGT is already configured and steps toward more sensitive values, stopping the moment a step false-triggers in open space. KAST prints an estimated test-cycle count before it starts, and if an ADXL345 is set up, folds in vibration data too.
 
-Once it's done, it reports the best SGT found and where the CSV/PNG landed. If you also want to sweep current or homing speed:
+Once it's done, it reports the best SGT found and where the CSV/PNG landed. If you also want to sweep current:
 
 ```
 KAST_CALIBRATE STEPPER=stepper_x AXIS=x CURRENT_MIN=0.35 CURRENT_MAX=0.6 CURRENT_STEP=0.05
@@ -125,9 +125,17 @@ Or just run `KAST_TUNE_ALL` to do both back to back.
 
 ## 7. Look at the graph
 
-If auto-plotting is on, check `results_dir/stepper_x/` for the PNG. It plots score, success rate, and roughness (if you have an ADXL345) against SGT, one line per current/speed combo tested. You're looking for a wide flat region of 100% success rate with a low score, not just the single best point, since that's the more mechanically robust choice.
+If auto-plotting is on, check `results_dir/stepper_x/` for the PNG. It plots score, success rate (rate of NOT false-triggering), and roughness (if you have an ADXL345) against SGT, one line per current tested. You're looking for a wide flat region of 100% success rate with a low score, not just the single best point, since that's the more mechanically robust choice.
 
-## 8. Apply and save
+## 8. Confirm it actually works, then apply and save
+
+`KAST_CALIBRATE` only tells you a value doesn't false-trigger in open space. It doesn't confirm that value is sensitive enough to trigger reliably at the real endstop, where the mechanical stall applies more load than free motion. Before applying, run the real thing:
+
+```
+KAST_TEST STEPPER=stepper_x AXIS=x SAMPLES=10
+```
+
+If that's not 100%, don't apply, either try a more sensitive SGT within what `KAST_CALIBRATE` found safe, or investigate mechanics. If it is 100%:
 
 ```
 KAST_APPLY STEPPER=stepper_x
@@ -135,7 +143,7 @@ KAST_APPLY STEPPER=stepper_y
 SAVE_CONFIG
 ```
 
-This stages the winning values into your config (`driver_SGT` in the driver section, `homing_speed` in the stepper section if swept, `variable_home_current` in the macro if current was swept) and restarts Klipper to pick them up.
+This stages the winning values into your config (`driver_SGT` in the driver section, `variable_home_current` in the macro if current was swept) and restarts Klipper to pick them up.
 
 ## 9. Re-check
 
@@ -145,4 +153,4 @@ After the restart, confirm it stuck:
 KAST_TEST STEPPER=stepper_x AXIS=x SAMPLES=10
 ```
 
-Should read 100% now. Worth re-running `KAST_TEST` again after any mechanical changes (belt tension, new hardware, etc.), since sensorless homing reliability can drift.
+Should still read 100%. Worth re-running `KAST_TEST` again after any mechanical changes (belt tension, new hardware, etc.), since sensorless homing reliability can drift.

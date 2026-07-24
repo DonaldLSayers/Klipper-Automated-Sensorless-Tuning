@@ -1,20 +1,20 @@
 # KAST - Klipper Automated Sensorless Tuning
 
-KAST is a [Klipper](https://www.klipper3d.org/) `extras` module that automatically searches for a reliable `driver_SGT` (StallGuard sensitivity), and optionally homing current and homing speed, for sensorless-homing steppers. No more hand-tuning by trial and error.
+KAST is a [Klipper](https://www.klipper3d.org/) `extras` module that automatically searches for a reliable `driver_SGT` (StallGuard sensitivity), and optionally homing current, for sensorless-homing steppers. No more hand-tuning by trial and error.
 
-It works by repeatedly homing an axis across a range of candidate values and scoring each one on:
+`KAST_CALIBRATE` doesn't search toward the real endstop. It moves the axis to bed center and tests short back-and-forth moves there instead, well clear of any hard stop, so a false StallGuard trigger just stops that move short and gets logged, not a crash. It starts from whatever SGT is already configured (which should already work at the real endstop) and steps toward more sensitive values one at a time, stopping the moment a step false-triggers in open space, no upside to testing further in that direction.
 
-- **Reliability**: did the axis home successfully every time?
-- **Repeatability**: how consistent is the triggered position across attempts?
-- **Smoothness** *(optional)*: if an ADXL345 accelerometer is configured, KAST samples vibration during each homing move and penalizes candidates that look mechanically rough (a sign of near-miss stall detection or skipped steps), even if they technically "worked".
+This tells you the most sensitive SGT that doesn't false-trigger under ordinary (lower) load. It does not by itself confirm that value is sensitive enough to reliably trigger at the real endstop, where the mechanical stall applies more load than free motion, so `KAST_TEST` (a separate command that does real, repeated `G28`s) is what actually confirms a candidate before you trust it, see below.
 
-The best-scoring combination gets reported, and can be staged into your config with `KAST_APPLY` + `SAVE_CONFIG`.
+If an ADXL345 accelerometer is configured, KAST also samples vibration during each test move and folds it into scoring, on top of whether it false-triggered.
+
+The best result gets reported, and can be staged into your config with `KAST_APPLY` + `SAVE_CONFIG`.
 
 New here? [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through the whole process step by step. This README is more of a reference.
 
 ## Status
 
-Early / experimental. Test on a machine you can supervise, sweeping `driver_SGT` and current will home the axis many times in a row.
+Early / experimental. Test on a machine you can supervise. `KAST_CALIBRATE`'s testing happens near bed center rather than at the real endstop specifically to avoid crash risk, but it's still automated repeated motion, keep an eye on the first few runs regardless. `KAST_TEST` performs real `G28`s and deserves the same caution any repeated homing does.
 
 ## Install
 
@@ -45,28 +45,23 @@ Optional parameters:
 
 | Param | Default | Meaning |
 |---|---|---|
-| `AXIS` | last char of `STEPPER` | Axis letter to home (`x`/`y`/`z`) |
-| `SGT_MIN` / `SGT_MAX` | see below | Sweep range for the stall-sensitivity field |
-| `SGT_RADIUS` | `16` (config `sgt_radius`) | How far past the currently configured SGT the default sweep explores, in the more-sensitive direction only |
-| `SGT_STEP` | `8` (config `sgt_step`) | Step size across the sweep |
-| `SAMPLES` | `5` (config `samples`) | Homing attempts per candidate |
-| `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep homing current (amps) over this range |
+| `AXIS` | last char of `STEPPER` | Axis letter to test (`x`/`y`) |
+| `SGT_MIN` / `SGT_MAX` | see below | Search range for the stall-sensitivity field |
+| `SGT_RADIUS` | `16` (config `sgt_radius`) | How far past the currently configured SGT the default search explores, in the more-sensitive direction only |
+| `SGT_STEP` | `8` (config `sgt_step`) | Step size across the search |
+| `SAMPLES` | `5` (config `samples`) | Test cycles per candidate |
+| `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep current (amps) over this range |
 | `CURRENT_STEP` | `0.1` | Step size for the current sweep |
-| `HOMING_SPEED_MIN` / `HOMING_SPEED_MAX` | unset | Also sweep homing speed (mm/s) over this range |
-| `HOMING_SPEED_STEP` | `5.0` | Step size for the speed sweep |
+| `SQUARE_SIZE` | `100` (config `safe_zone_square`) | Total span (mm) of the test moves, centered on the bed: `50` becomes ±50mm from center each direction |
+| `SAFE_ZONE_SPEED` | `50.0` (config `safe_zone_speed`) | Speed (mm/s) for the test moves |
 
-If `driver_SGT`/`driver_SGTHRS` is already set in printer.cfg, the default sweep only explores toward *more* sensitive settings from there, never less. A known-working value means the printer already survives that much force, testing something harsher has no upside, only risk of a worse impact. Concretely: for signed `sgt` drivers (lower = more sensitive), the default range is `current - SGT_RADIUS` to `current`, it never defaults past `current`. For unsigned `sg4_thrs` drivers (higher = more sensitive), it's the same idea in reverse, `current` to `current + SGT_RADIUS`. Pass `SGT_MIN`/`SGT_MAX` explicitly if you deliberately want to test the harsher direction too. If `driver_SGT`/`driver_SGTHRS` isn't set yet (a fresh printer with no baseline), KAST falls back to the driver's full theoretical range, since there's nothing to anchor to yet, that first run is the one to watch closely.
+If `driver_SGT`/`driver_SGTHRS` is already set in printer.cfg, the default search only explores toward *more* sensitive settings from there, never less. A known-working value means the printer already survives that much force at the real endstop, testing something harsher has no upside, only risk. Concretely: for signed `sgt` drivers (lower = more sensitive), the default range is `current - SGT_RADIUS` to `current`, it never defaults past `current`. For unsigned `sg4_thrs` drivers (higher = more sensitive), it's the same idea in reverse. Pass `SGT_MIN`/`SGT_MAX` explicitly if you deliberately want to test the other direction too. If `driver_SGT`/`driver_SGTHRS` isn't set yet (a fresh printer with no baseline), KAST falls back to the driver's full theoretical range and a blind sweep instead of walking from a baseline, since there's nothing to anchor to yet, no crash risk either way since it's all still bed-center testing.
 
-When a baseline exists, KAST doesn't blindly sweep the whole computed range either. It tests the baseline value first, then steps one `SGT_STEP` at a time away from it, stopping in that direction the moment a step isn't 100% reliable, rather than committing to the whole range regardless of what happens along the way.
+When a baseline exists, KAST doesn't test the whole computed range either. It tests the baseline value first, then steps one `SGT_STEP` at a time away from it, stopping in that direction the moment a step false-triggers, rather than committing to the whole range regardless of what happens along the way.
 
-That alone isn't enough, though: it only catches a step that fails outright. It cannot catch a step that "succeeds" via a false, early StallGuard trigger, since Klipper reports the same configured `position_endstop` value after any triggered `G28` whether the trigger was real or not, there's nothing in that reported position to tell the two apart. Two checks in `macros/kast.cfg`'s `_KAST_HOME_AXIS` catch that instead, by measuring real physical movement rather than trusting Klipper's reported position:
+If you don't set `CURRENT_MIN`/`CURRENT_MAX`, KAST tests at whatever `variable_home_current` is currently set to in `macros/kast.cfg`'s `_KAST_HOMING_STATE` (falling back to whatever current is already configured if that macro isn't in use), rather than leaving current untouched at full `run_current`. StallGuard's threshold depends heavily on current; testing at full current could make everything look falsely safe and not reflect what a real homing move at reduced current would actually do.
 
-- `variable_min_home_travel` (default 20mm): each individual homing move must travel at least this far, or it's treated as a false trigger and the whole calibration aborts immediately, before the backoff move that would otherwise turn it into real drift.
-- `variable_max_cycle_drift` (default 3mm): a false trigger that's marginal enough to occasionally clear the travel check can still cause slow drift over many cycles rather than a single obviously-bad one. This compares each cycle's *starting* (resting) position against the previous cycle's, which should converge to a fixed point under correct operation, so any steady creep shows up here within a few cycles even if no single cycle looked bad enough on its own to trip the travel check. Scoped to back-to-back calls within one `KAST_CALIBRATE`/`KAST_TEST` run (the baseline resets at the start of each run), so it won't false-positive just because the toolhead was somewhere else before an ordinary `G28`.
-
-The same principle applies if you sweep `CURRENT_MIN`/`CURRENT_MAX`: higher current means more torque before StallGuard triggers, which generally means a harder impact. There's no automatic default here since current sweeping is opt-in, but it's worth keeping `CURRENT_MAX` at or below whatever's already working rather than pushing it higher, for the same reason as the SGT default above.
-
-StallGuard sensitivity is velocity-dependent, an SGT that's reliable at one homing speed may not be at another. So if you care about a specific `homing_speed`, it's worth sweeping SGT at that speed rather than assuming a value tuned elsewhere carries over. Sweeping all three dimensions (SGT x current x speed) multiplies trial count fast, KAST prints an estimated homing-move count before starting so you know what you're in for.
+Current still matters for impact force at the real endstop even though testing itself happens in free space: higher current means more torque before StallGuard triggers there, generally a harder impact. Worth keeping `CURRENT_MAX` at or below whatever's already working rather than pushing it higher, same reasoning as the SGT default above.
 
 Then:
 
@@ -80,13 +75,13 @@ SAVE_CONFIG                     # write + restart
 
 ## Testing current settings
 
-To sanity-check whatever is currently configured, no sweeping, no changes, without running a full calibration:
+`KAST_CALIBRATE` never does a real `G28`, it only tells you what doesn't false-trigger near bed center. `KAST_TEST` is the command that actually confirms a value works for real homing: it repeatedly homes the axis for real, at whatever `driver_SGT`/current is currently configured, no sweeping, no changes.
 
 ```
 KAST_TEST STEPPER=stepper_x AXIS=x SAMPLES=10
 ```
 
-Useful after `SAVE_CONFIG`, after mechanical changes, or just to confirm a config is still reliable. `macros/kast.cfg` provides `KAST_TEST_X`, `KAST_TEST_Y`, and `KAST_TEST_ALL` shortcuts.
+Run this after `KAST_APPLY` + `SAVE_CONFIG` to confirm a KAST_CALIBRATE result actually works in practice, after mechanical changes, or just to confirm a config is still reliable. This one goes through the real homing path (`macros/kast.cfg`'s `[homing_override]`, with its own travel/drift safety checks, see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)), so it carries the same considerations any repeated real homing does. `macros/kast.cfg` provides `KAST_TEST_X`, `KAST_TEST_Y`, and `KAST_TEST_ALL` shortcuts.
 
 ## Notes on TMC drivers
 
@@ -97,19 +92,20 @@ KAST auto-detects the TMC driver behind each stepper and uses the correct StallG
 
 On TMC2240, `sgt` drives the default SpreadCycle-based sensorless homing path. TMC2240 also has a separate `sg4_thrs` field that only takes effect if you've deliberately switched to SG4/StealthChop-based homing (non-zero `sg4_thrs`). KAST does not target that mode.
 
-Values are applied live via Klipper's built-in `SET_TMC_FIELD` / `SET_TMC_CURRENT` commands, so no driver-specific code lives in KAST itself. Homing speed has no equivalent gcode command since Klipper fixes it at config-parse time, so KAST overrides it by writing directly to the axis's `PrinterRail` object in memory for the duration of a sweep, then restores the original value.
+Values are applied live via Klipper's built-in `SET_TMC_FIELD` / `SET_TMC_CURRENT` commands, so no driver-specific code lives in KAST itself.
 
 ## What KAST_APPLY persists, and where
 
 - `driver_SGT` / `driver_SGTHRS` (the field KAST tuned) goes into the driver's own config section, e.g. `[tmc2240 stepper_x]`.
-- `homing_speed`, if swept, goes into the stepper's section, e.g. `[stepper_x]` (this is a real Klipper config option).
-- Homing current, if swept, goes into `variable_home_current` in `[gcode_macro _KAST_HOMING_STATE]`, since Klipper has no native `home_current` config field. If you're not using `macros/kast.cfg`'s homing override, KAST just reports the best current instead and you apply it by hand wherever your own macro sets it.
+- Current, if swept, goes into `variable_home_current` in `[gcode_macro _KAST_HOMING_STATE]`, since Klipper has no native `home_current` config field. If you're not using `macros/kast.cfg`'s homing override, KAST just reports the best current instead and you apply it by hand wherever your own macro sets it.
+
+Applying a `KAST_CALIBRATE` result is a good time to run `KAST_TEST` right after, per the note above, since `KAST_CALIBRATE` alone only confirms the value doesn't false-trigger near bed center, not that it homes reliably for real.
 
 ## Results and graphs
 
 Every `KAST_CALIBRATE` run writes a CSV of all trials to `results_dir/<stepper_name>/kast_<stepper_name>_<timestamp>.csv` (default `results_dir`: `~/printer_data/config/kast_results`), one subfolder per stepper, similar to how [klippain-shaketune](https://github.com/Frix-x/klippain-shaketune) organizes its resonance-test output.
 
-If `enable_plots` is on (default) and matplotlib is available, KAST launches `scripts/kast_plot.py` as a detached background process right after writing the CSV. It never blocks klippy's reactor, and a missing/slow matplotlib just means no PNG shows up, the CSV is kept either way. The PNG lands next to the CSV and plots score, success rate, and (if an ADXL345 was used) roughness, all against SGT, with one line per current/speed combination swept.
+If `enable_plots` is on (default) and matplotlib is available, KAST launches `scripts/kast_plot.py` as a detached background process right after writing the CSV. It never blocks klippy's reactor, and a missing/slow matplotlib just means no PNG shows up, the CSV is kept either way. The PNG lands next to the CSV and plots score, success rate (here: rate of NOT false-triggering), and (if an ADXL345 was used) roughness, all against SGT, with one line per current tested.
 
 To render a graph manually (e.g. from a workstation, or if auto-plotting is off):
 

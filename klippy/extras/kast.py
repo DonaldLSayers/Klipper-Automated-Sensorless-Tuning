@@ -193,6 +193,88 @@ class KASTHomingSpeedOverride:
             self.orig_speed = None
 
 
+class KASTSafeZoneTester:
+    """Tests whether a given SGT/current causes a false StallGuard
+    trigger during ordinary, unobstructed back-and-forth moves near
+    bed center, instead of searching toward the real endstop. Since
+    there's no hard stop anywhere near the test region, a false
+    trigger just means the move stops early and gets logged, not a
+    crash -- this is what makes it safe to explore SGT much more
+    directly than a real homing search would be.
+
+    Built on Klipper's own manual_home() (the same primitive probes
+    use for probing_move()), with check_triggered=False: if the
+    endstop never fires, the move just completes normally at the
+    target with no error, rather than raising like a real homing
+    search would after a full-travel failure.
+
+    Important limitation: this only finds the SGT below which
+    StallGuard does NOT false-trigger under ordinary (lower) load. It
+    does not by itself confirm a value is sensitive enough to reliably
+    trigger at the real endstop, where the mechanical stall applies
+    more load than free motion does. In practice a value that's safe
+    here should trigger at least as reliably there, but KAST_TEST's
+    real G28 check is what actually confirms that before trusting a
+    value for print use."""
+
+    def __init__(self, printer, gcode, stepper_name, axis, travel_mm, speed):
+        self.printer = printer
+        self.gcode = gcode
+        self.axis = axis.lower()
+        self.axis_idx = {'x': 0, 'y': 1}[self.axis]
+        self.travel_mm = travel_mm
+        self.speed = speed
+        self.toolhead = printer.lookup_object('toolhead')
+        self.rail = KASTHomingSpeedOverride._find_rail(printer, stepper_name)
+        self.endstops = self.rail.get_endstops()
+        self.phoming = printer.lookup_object('homing')
+
+    def _bed_center(self):
+        eventtime = self.printer.get_reactor().monotonic()
+        status = self.toolhead.get_status(eventtime)
+        axis_min = status['axis_minimum']
+        axis_max = status['axis_maximum']
+        return (axis_min[self.axis_idx] + axis_max[self.axis_idx]) / 2.0
+
+    def _move_to_center(self, center):
+        self.gcode.run_script_from_command(
+            "G90\nG1 %s%.3f F%d\nM400"
+            % (self.axis.upper(), center, int(self.speed * 60)))
+
+    def _test_one_direction(self, center, direction):
+        """Returns (triggered, travelled_mm)."""
+        target = list(self.toolhead.get_position())
+        target[self.axis_idx] = center + direction * self.travel_mm
+        epos = self.phoming.manual_home(
+            self.toolhead, self.endstops, target, self.speed,
+            probe_pos=False, triggered=True, check_triggered=False)
+        travelled = abs(epos[self.axis_idx] - center)
+        triggered = travelled < (self.travel_mm - 1.0)
+        return triggered, travelled
+
+    def test(self):
+        """Runs one full back-and-forth cycle (both directions) from
+        bed center. Returns (ok, err); ok is True only if NEITHER
+        direction false-triggered."""
+        center = self._bed_center()
+        self._move_to_center(center)
+        result_ok, result_err = True, None
+        for direction in (1, -1):
+            triggered, travelled = self._test_one_direction(
+                center, direction)
+            # Return to center regardless of outcome -- both a
+            # trigger and a completed move land well within the safe
+            # zone (bed center +/- travel_mm), so an ordinary move
+            # back is safe either way.
+            self._move_to_center(center)
+            if triggered and result_ok:
+                axis_label = ("+" if direction > 0 else "-") + self.axis.upper()
+                result_ok, result_err = False, (
+                    "false trigger testing %s: stopped after %.1fmm "
+                    "of %.1fmm" % (axis_label, travelled, self.travel_mm))
+        return result_ok, result_err
+
+
 class KASTAccelHelper:
     """Optional ADXL345 vibration capture around a homing move. Produces
     a single 'roughness' score (higher = more vibration / more likely a
@@ -241,7 +323,8 @@ class KASTAccelHelper:
 class KASTStepperTuner:
     """Runs the sweep/search for a single stepper (one axis / one motor)."""
 
-    def __init__(self, kast, stepper_name, axis, config_section):
+    def __init__(self, kast, stepper_name, axis, config_section,
+                 safe_zone_travel=None, safe_zone_speed=None):
         self.kast = kast
         self.printer = kast.printer
         self.gcode = kast.gcode
@@ -250,6 +333,16 @@ class KASTStepperTuner:
         self.driver = KASTDriverAdapter(self.printer, stepper_name)
         self.accel = kast.accel
         self._speed_override = None
+        # safe_zone_travel not None selects the safe-zone tester (see
+        # KASTSafeZoneTester) instead of real G28 homing for trial()'s
+        # single-attempt test. Used by KAST_CALIBRATE; KAST_TEST keeps
+        # using real G28, since confirming the CURRENT settings home
+        # for real is the whole point of that command.
+        self.safe_tester = None
+        if safe_zone_travel is not None:
+            self.safe_tester = KASTSafeZoneTester(
+                self.printer, self.gcode, stepper_name, axis,
+                safe_zone_travel, safe_zone_speed)
         self._reset_cycle_drift_baseline()
 
     def _reset_cycle_drift_baseline(self):
@@ -311,6 +404,18 @@ class KASTStepperTuner:
         idx = {'x': 0, 'y': 1, 'z': 2}[self.axis.lower()]
         return True, pos[idx], None
 
+    def _safe_zone_once(self):
+        """Same (ok, pos, err) shape as _home_once, but via
+        KASTSafeZoneTester: ok=True means no false trigger during the
+        back-and-forth test move, not "homed successfully". pos is
+        always None here, position isn't diagnostic in the same way
+        when every attempt returns to the same bed-center reference."""
+        try:
+            ok, err = self.safe_tester.test()
+        except self.gcode.error as e:
+            return False, None, str(e)
+        return ok, None, err
+
     def trial(self, sgt, current, homing_speed, samples):
         """Runs `samples` homing attempts at the given SGT/current/speed
         and returns a score dict. sgt=None leaves driver_SGT untouched
@@ -321,7 +426,13 @@ class KASTStepperTuner:
             self.driver.set_sgt(sgt)
         if current is not None:
             self.driver.set_current(current)
-        self._set_homing_speed(homing_speed)
+        test_fn = self._home_once
+        if self.safe_tester is not None:
+            test_fn = self._safe_zone_once
+        else:
+            # KASTSafeZoneTester uses its own explicit speed, not the
+            # rail.homing_speed override this mechanism pokes.
+            self._set_homing_speed(homing_speed)
         self.boop(sgt)
 
         successes = 0
@@ -329,7 +440,7 @@ class KASTStepperTuner:
         roughness_vals = []
         last_error = None
         for _ in range(samples):
-            roughness, (ok, pos, err) = self.accel.measure(self._home_once)
+            roughness, (ok, pos, err) = self.accel.measure(test_fn)
             if ok:
                 successes += 1
                 positions.append(pos)
@@ -455,6 +566,15 @@ class KAST:
         self.default_samples = config.getint('samples', 5, minval=1)
         self.default_sgt_step = config.getint('sgt_step', 8, minval=1)
         self.default_sgt_radius = config.getint('sgt_radius', 16, minval=1)
+        # KAST_CALIBRATE tests near bed center rather than searching a
+        # real endstop: a false StallGuard trigger there just stops
+        # the test move early and gets logged, there's no hard stop
+        # anywhere nearby to crash into. safe_zone_square is the total
+        # span (e.g. 100 -> +/-50mm each direction from center).
+        self.default_safe_zone_square = config.getfloat(
+            'safe_zone_square', 100.0, above=0.0)
+        self.default_safe_zone_speed = config.getfloat(
+            'safe_zone_speed', 50.0, above=0.0)
         self.results_dir = os.path.expanduser(
             config.get('results_dir', '~/printer_data/config/kast_results'))
         self.enable_plots = config.getboolean('enable_plots', True)
@@ -535,8 +655,8 @@ class KAST:
         return png_path
 
     cmd_KAST_CALIBRATE_help = (
-        "Search for a reliable driver_SGT (and optionally home_current) "
-        "on a sensorless-homing stepper")
+        "Search for a reliable driver_SGT near bed center (no real "
+        "endstop search, so no crash risk) on a sensorless-homing stepper")
 
     def cmd_KAST_CALIBRATE(self, gcmd):
         stepper_name = gcmd.get('STEPPER')
@@ -546,16 +666,20 @@ class KAST:
         current_min = gcmd.get_float('CURRENT_MIN', None)
         current_max = gcmd.get_float('CURRENT_MAX', None)
         current_step = gcmd.get_float('CURRENT_STEP', 0.1, above=0.0)
-        speed_min = gcmd.get_float('HOMING_SPEED_MIN', None, above=0.0)
-        speed_max = gcmd.get_float('HOMING_SPEED_MAX', None, above=0.0)
-        speed_step = gcmd.get_float('HOMING_SPEED_STEP', 5.0, above=0.0)
+        square_size = gcmd.get_float(
+            'SQUARE_SIZE', self.default_safe_zone_square, above=0.0)
+        safe_zone_speed = gcmd.get_float(
+            'SAFE_ZONE_SPEED', self.default_safe_zone_speed, above=0.0)
 
         if self.fun_mode:
             gcmd.respond_info(
                 "KAST warming up for '%s'... hold onto your belts!"
                 % stepper_name)
 
-        tuner = KASTStepperTuner(self, stepper_name, axis, config_section=None)
+        tuner = KASTStepperTuner(
+            self, stepper_name, axis, config_section=None,
+            safe_zone_travel=square_size / 2.0,
+            safe_zone_speed=safe_zone_speed)
 
         # Default sweep range: only explores MORE sensitive (gentler)
         # settings than whatever's already configured, never less. A
@@ -604,26 +728,47 @@ class KAST:
                 currents.append(round(c, 3))
                 c += current_step
         else:
-            currents = [None]
+            # Without an explicit sweep, default to whatever home_current
+            # a real homing move would actually use, not leave current
+            # untouched at full run_current. StallGuard's threshold
+            # depends heavily on current, testing at full current could
+            # make everything look falsely "safe" and not reflect real
+            # homing at all.
+            home_current = None
+            homing_state = self.printer.lookup_object(
+                'gcode_macro _KAST_HOMING_STATE', None)
+            if homing_state is not None:
+                home_current = homing_state.variables.get('home_current')
+            currents = [home_current]
+            if home_current is not None:
+                gcmd.respond_info(
+                    "KAST: no CURRENT_MIN/MAX given, testing at "
+                    "home_current=%.2fA (from _KAST_HOMING_STATE)"
+                    % home_current)
+            else:
+                gcmd.respond_info(
+                    "KAST: no CURRENT_MIN/MAX given and no "
+                    "_KAST_HOMING_STATE macro found, testing at whatever "
+                    "current is currently configured -- if that's full "
+                    "run_current rather than a reduced homing current, "
+                    "results may not reflect real homing behavior.")
 
-        if speed_min is not None and speed_max is not None:
-            homing_speeds = []
-            s = speed_min
-            while s <= speed_max + 1e-9:
-                homing_speeds.append(round(s, 3))
-                s += speed_step
-        else:
-            homing_speeds = [None]
+        homing_speeds = [None]  # not swept; safe-zone testing uses its
+                                 # own explicit SAFE_ZONE_SPEED instead
+                                 # of the rail's homing_speed mechanism
 
         total_trials = (
             ((sgt_max - sgt_min) // sgt_step + 1)
             * len(currents) * len(homing_speeds) * samples)
         gcmd.respond_info(
-            "KAST: sweeping SGT %d..%d for '%s' (up to ~%d homing moves, "
-            "fewer if it stops early on an unreliable step). This can "
-            "take a while and will heat up the motor -- interrupt with "
-            "an emergency stop if something looks wrong."
-            % (sgt_min, sgt_max, stepper_name, total_trials))
+            "KAST: testing SGT %d..%d for '%s' near bed center, +/-%.1fmm "
+            "each direction (up to ~%d test cycles, fewer if it stops "
+            "early on an unreliable step). This tests in free space, "
+            "away from any hard stop, so a false trigger just logs and "
+            "stops that move short, no crash risk, but keep an eye on "
+            "it regardless."
+            % (sgt_min, sgt_max, stepper_name, square_size / 2.0,
+               total_trials))
 
         try:
             best, all_results = tuner.search(
@@ -657,24 +802,27 @@ class KAST:
                     % (csv_path, csv_path))
 
         if best['success_rate'] < 1.0:
-            gcmd.respond_info(
-                "KAST: no fully reliable SGT/current/speed combo found "
-                "for '%s'. Best attempt: SGT=%s CURRENT=%s SPEED=%s "
-                "(success_rate=%.0f%%). Consider widening the search "
-                "range or checking mechanics."
-                % (stepper_name, best['sgt'], best['current'],
-                   best['homing_speed'], best['success_rate'] * 100))
+            msg = ("KAST: no fully false-trigger-free SGT/current found "
+                   "for '%s'. Best attempt: SGT=%s CURRENT=%s "
+                   "(success_rate=%.0f%%)"
+                   % (stepper_name, best['sgt'], best['current'],
+                      best['success_rate'] * 100))
+            if best['last_error']:
+                msg += " (%s)" % best['last_error']
+            msg += ". Consider a smaller SGT_RADIUS or checking mechanics."
+            gcmd.respond_info(msg)
         else:
             msg = ("KAST: best result for '%s' -> SGT=%s"
                    % (stepper_name, best['sgt']))
             if best['current'] is not None:
                 msg += " CURRENT=%.2fA" % best['current']
-            if best['homing_speed'] is not None:
-                msg += " SPEED=%.1fmm/s" % best['homing_speed']
-            msg += (" (pos_stddev=%.4f" % best['pos_stddev'])
             if best['roughness'] is not None:
-                msg += ", roughness=%.3f" % best['roughness']
-            msg += "). Run KAST_APPLY STEPPER=%s to save." % stepper_name
+                msg += " (roughness=%.3f)" % best['roughness']
+            msg += (". This value never false-triggered near bed center, "
+                     "which doesn't by itself confirm it's sensitive "
+                     "enough to trigger reliably at the real endstop -- "
+                     "run KAST_TEST STEPPER=%s to confirm that with real "
+                     "homing before KAST_APPLY." % stepper_name)
             gcmd.respond_info(msg)
 
     cmd_KAST_TEST_help = (
@@ -716,11 +864,9 @@ class KAST:
         for stepper_name, data in self.last_results.items():
             best = data['best']
             gcmd.respond_info(
-                "%s: SGT=%s CURRENT=%s SPEED=%s success_rate=%.0f%% "
-                "score=%.2f"
+                "%s: SGT=%s CURRENT=%s success_rate=%.0f%% score=%.2f"
                 % (stepper_name, best['sgt'], best['current'],
-                   best['homing_speed'], best['success_rate'] * 100,
-                   best['score']))
+                   best['success_rate'] * 100, best['score']))
 
     cmd_KAST_APPLY_help = (
         "Persist the last KAST_CALIBRATE result for a stepper into the "
