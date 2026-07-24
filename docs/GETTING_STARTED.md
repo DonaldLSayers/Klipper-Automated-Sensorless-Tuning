@@ -10,40 +10,59 @@ If you just want the quick reference (command params, config options), see the m
 - Be near the printer, or watching a webcam, the first few times you run a sweep. Homing over and over at aggressive settings can occasionally overshoot before KAST catches it.
 - Sensorless homing tuning is inherently a bit knock-y and buzzy on the steppers. That's normal.
 
-## 1. Get the repo onto the printer
+## 1. Run the installer
 
-SSH into the host running klippy (the Pi, or wherever), and clone the whole repo somewhere inside your Klipper config tree, for example:
+SSH into the host running klippy (the Pi, or wherever), and run:
+
+```
+wget -O - https://raw.githubusercontent.com/DonaldLSayers/Klipper-Automated-Sensorless-Tuning/main/install.sh | bash
+```
+
+This clones the repo to `~/kast`, symlinks `kast.py` into Klipper's `extras/` folder, symlinks the macros into your config folder and adds the `[include]` line for them, installs matplotlib into Klipper's venv (for auto-plotting), and registers KAST with Moonraker's update manager. It's safe to re-run any time, e.g. to pick up updates.
+
+If your install doesn't follow the usual MainsailOS/Fluidd layout, override paths with environment variables, e.g. `KLIPPER_DIR=/home/pi/klipper wget -O - .../install.sh | bash`. See the top of `install.sh` for all of them.
+
+Prefer doing it manually, or the installer doesn't fit your setup? Expand the steps below.
+
+<details>
+<summary>Manual install steps</summary>
+
+Clone the whole repo somewhere inside your Klipper config tree (don't just copy `kast.py` on its own, auto-plotting looks for `scripts/kast_plot.py` relative to `kast.py`'s own location, so it needs the folder structure intact):
 
 ```
 cd ~/printer_data/config
 git clone https://github.com/DonaldLSayers/Klipper-Automated-Sensorless-Tuning.git kast
 ```
 
-Don't just copy `kast.py` on its own. Auto-plotting looks for `scripts/kast_plot.py` relative to `kast.py`'s own location, so it needs the folder structure intact.
-
-## 2. Symlink the extras module in
+Symlink the extras module in:
 
 ```
 ln -s ~/printer_data/config/kast/klippy/extras/kast.py ~/klipper/klippy/extras/kast.py
 ```
 
-Adjust paths to match your install. Using a symlink instead of a copy means `git pull` inside `kast/` keeps it updated.
-
-## 3. Include the macros
-
-In your `printer.cfg`:
+Add to `printer.cfg`:
 
 ```
 [include kast/macros/kast.cfg]
 ```
 
-This pulls in `_KAST_HOME_AXIS`, KAST's own `[homing_override]`, and the `KAST_TUNE_*` / `KAST_TEST_*` shortcut macros.
+For auto-plotting, install matplotlib into Klipper's venv:
 
-**If you already have your own `[homing_override]`** (a lot of CoreXY sensorless setups do, since homing one axis moves both motors), don't include both. Open `kast/macros/kast.cfg`, and merge your macro's per-axis logic into `_KAST_HOME_AXIS` there instead. The important part to keep is that it reads `s.home_current` from the shared `_KAST_HOMING_STATE` variable rather than a hardcoded number, that's what lets KAST's current sweep actually take effect instead of being silently overwritten right before each homing move.
+```
+~/klippy-env/bin/pip install matplotlib
+```
 
-Then check `variable_driver_x` / `variable_driver_y` in `_KAST_HOMING_STATE` match your actual driver sections (e.g. `'tmc2209 stepper_x'` instead of the `'tmc2240 stepper_x'` default).
+(paths depend on your install). If you skip this, KAST still writes the raw CSV every time, you can graph it later from any machine with matplotlib installed.
 
-## 4. Add the [kast] config section
+</details>
+
+## 2. Point the macros at your drivers
+
+Open `~/kast/macros/kast.cfg` and check `variable_driver_x` / `variable_driver_y` in `_KAST_HOMING_STATE` match your actual driver sections (e.g. `'tmc2209 stepper_x'` instead of the `'tmc2240 stepper_x'` default).
+
+**If you already have your own `[homing_override]`** (a lot of CoreXY sensorless setups do, since homing one axis moves both motors), don't run both. Merge your macro's per-axis logic into `_KAST_HOME_AXIS` in `kast-macros.cfg` instead. The important part to keep is that it reads `s.home_current` from the shared `_KAST_HOMING_STATE` variable rather than a hardcoded number, that's what lets KAST's current sweep actually take effect instead of being silently overwritten right before each homing move.
+
+## 3. Add the [kast] config section
 
 ```
 [kast]
@@ -57,25 +76,15 @@ enable_plots: true
 
 See [docs/example-printer.cfg](example-printer.cfg) for the full annotated version. If you don't have an ADXL345 wired up, that's fine, leave `accel_chip` as-is and KAST will just skip the vibration scoring.
 
-## 5. (Optional) enable auto-plotting
-
-If you want KAST to render a PNG graph automatically after each calibration, matplotlib needs to be importable by whatever `python3` klippy resolves to on the host:
-
-```
-~/klippy-env/bin/pip install matplotlib
-```
-
-(path depends on your install, that's the typical MainsailOS/venv layout). If you skip this, KAST still writes the raw CSV every time, you can graph it later from any machine with matplotlib installed.
-
-## 6. Restart Klipper
+## 4. Restart Klipper
 
 ```
 RESTART
 ```
 
-Check the console for errors. If `[kast]` fails to load, it's almost always a driver name mismatch (see step 3).
+Check the console for errors. If `[kast]` fails to load, it's almost always a driver name mismatch (see step 2).
 
-## 7. Check your baseline first
+## 5. Check your baseline first
 
 Before sweeping anything, see how your existing settings actually perform:
 
@@ -85,7 +94,7 @@ KAST_TEST STEPPER=stepper_x AXIS=x SAMPLES=10
 
 This homes X ten times at whatever `driver_SGT` and current are already configured, and reports success rate and repeatability. If it's already at 100%, great, you might not need a full sweep. If it's flaky, that's your starting point.
 
-## 8. Run a calibration sweep
+## 6. Run a calibration sweep
 
 Start with just SGT:
 
@@ -111,11 +120,11 @@ KAST_CALIBRATE STEPPER=stepper_y AXIS=y
 
 Or just run `KAST_TUNE_ALL` to do both back to back.
 
-## 9. Look at the graph
+## 7. Look at the graph
 
 If auto-plotting is on, check `results_dir/stepper_x/` for the PNG. It plots score, success rate, and roughness (if you have an ADXL345) against SGT, one line per current/speed combo tested. You're looking for a wide flat region of 100% success rate with a low score, not just the single best point, since that's the more mechanically robust choice.
 
-## 10. Apply and save
+## 8. Apply and save
 
 ```
 KAST_APPLY STEPPER=stepper_x
@@ -125,7 +134,7 @@ SAVE_CONFIG
 
 This stages the winning values into your config (`driver_SGT` in the driver section, `homing_speed` in the stepper section if swept, `variable_home_current` in the macro if current was swept) and restarts Klipper to pick them up.
 
-## 11. Re-check
+## 9. Re-check
 
 After the restart, confirm it stuck:
 

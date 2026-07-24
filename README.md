@@ -18,14 +18,22 @@ Early / experimental. Test on a machine you can supervise, sweeping `driver_SGT`
 
 ## Install
 
-Clone or symlink the **whole repo** into your Klipper config tree (e.g. `~/printer_data/config/kast`), rather than copying just `kast.py`. Auto-plotting (below) locates `scripts/kast_plot.py` relative to `kast.py`'s own path and won't find it otherwise.
+SSH into the machine running klippy and run:
 
-1. Symlink `klippy/extras/kast.py` into your Klipper install's `klippy/extras/` directory.
-2. `[include]` `macros/kast.cfg` from your `printer.cfg`. This installs KAST's own `[homing_override]`. If you already have one (e.g. a hand-written CoreXY dual-motor homing macro), merge its per-axis logic into `_KAST_HOME_AXIS` in `macros/kast.cfg` instead of including both, otherwise `KAST_CALIBRATE`'s current/speed sweeps will get silently overridden by your macro's own hardcoded values right before each homing move.
-3. In `macros/kast.cfg`, set `variable_driver_x` / `variable_driver_y` in `_KAST_HOMING_STATE` to your actual TMC driver sections (e.g. `'tmc2209 stepper_x'`) if they aren't TMC2240.
-4. Add a `[kast]` section, see [docs/example-printer.cfg](docs/example-printer.cfg).
-5. For auto-plotting, install matplotlib somewhere `python3` on the host can see it (`pip install matplotlib` in Klipper's venv, or system-wide). Not required otherwise, KAST still writes CSVs either way.
-6. Restart Klipper (`RESTART`).
+```
+wget -O - https://raw.githubusercontent.com/DonaldLSayers/Klipper-Automated-Sensorless-Tuning/main/install.sh | bash
+```
+
+This clones the repo to `~/kast`, symlinks `kast.py` into Klipper's `extras` folder, symlinks the macros into your config and adds the `[include]` line for them, installs matplotlib into Klipper's venv for auto-plotting, and registers KAST with Moonraker's update manager so it shows up for updates in Mainsail/Fluidd. Safe to re-run any time.
+
+It won't touch your `printer.cfg` beyond that one include line. You still need to:
+
+1. Check `variable_driver_x` / `variable_driver_y` in `~/kast/macros/kast.cfg`'s `_KAST_HOMING_STATE` match your actual TMC driver sections (e.g. `'tmc2209 stepper_x'`) if they aren't TMC2240.
+2. If you already have your own `[homing_override]` (common on CoreXY sensorless setups), merge its logic into `_KAST_HOME_AXIS` instead of running both, see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for why.
+3. Add a `[kast]` section, see [docs/example-printer.cfg](docs/example-printer.cfg).
+4. Restart Klipper (`RESTART`).
+
+Prefer to do it by hand, or the installer doesn't fit your setup? The full manual steps are in [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
 ## Usage
 
