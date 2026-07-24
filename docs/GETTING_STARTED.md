@@ -9,6 +9,7 @@ If you just want the quick reference (command params, config options), see the m
 - `install.sh` backs up your whole config folder automatically before it touches anything. If you're installing by hand instead, back up `printer.cfg` yourself first: `KAST_APPLY` writes to it via `SAVE_CONFIG`, same as any other Klipper calibration tool.
 - Be near the printer, or watching a webcam, the first few times you run a sweep. Homing over and over at aggressive settings can occasionally overshoot before KAST catches it.
 - Sensorless homing tuning is inherently a bit knock-y and buzzy on the steppers. That's normal.
+- **Installing KAST changes how your printer homes.** It ships its own `[homing_override]`, which replaces any existing one entirely, not just for KAST commands, for every `G28` from then on. Before running any KAST command, send a plain `G28` by itself first, with your hand near an emergency stop, and watch it home from a cold start (Z not yet homed). Confirm the toolhead lifts before any X/Y move and doesn't hit anything, on both this and the very next `G28`, before you trust it unattended.
 
 ## 1. Run the installer
 
@@ -56,11 +57,13 @@ For auto-plotting, install matplotlib into Klipper's venv:
 
 </details>
 
-## 2. Point the macros at your drivers
+## 2. Point the macros at your drivers, and read this if you already had a homing_override
 
 Open `~/kast/macros/kast.cfg` and check `variable_driver_x` / `variable_driver_y` in `_KAST_HOMING_STATE` match your actual driver sections (e.g. `'tmc2209 stepper_x'` instead of the `'tmc2240 stepper_x'` default).
 
-**If you already have your own `[homing_override]`** (a lot of CoreXY sensorless setups do, since homing one axis moves both motors), don't run both. Merge your macro's per-axis logic into `_KAST_HOME_AXIS` in `kast-macros.cfg` instead. The important part to keep is that it reads `s.home_current` from the shared `_KAST_HOMING_STATE` variable rather than a hardcoded number, that's what lets KAST's current sweep actually take effect instead of being silently overwritten right before each homing move.
+Also check `variable_prelift_z` (default 4mm). KAST's `[homing_override]` lifts Z this far before any X/Y homing move, using `SET_KINEMATIC_POSITION` to fake a known Z if Z hasn't been homed yet this session. This exists because a sensorless X/Y homing move at low Z can crash the nozzle into a bed clip, corner post, or the bed itself. Set it to whatever clears your printer's obstructions, or `0` if your printer genuinely has none (tall gantry, nothing in the way at Z=0). Don't guess low here, it's cheap insurance.
+
+**If you already have your own `[homing_override]`**, whether that's a CoreXY dual-motor macro or anything else, **read this carefully before installing**. Klipper only allows one active `[homing_override]`, whichever one loads last fully replaces the other, there's no merging. That means every safety behavior your existing override has (Z lifts, park moves, obstruction avoidance, whatever it does) needs to be ported into `_KAST_HOME_AXIS` / `_KAST_HOME_Z` / the `[homing_override]` gcode in `kast.cfg`, not just the current-handling bits. Skipping a step here doesn't fail loudly, it fails as a crash the next time you home. Go through your existing macro line by line and make sure every move it makes has an equivalent in KAST's version before you trust it unattended.
 
 ## 3. Add the [kast] config section
 
