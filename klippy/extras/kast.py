@@ -13,18 +13,25 @@ import logging
 import statistics
 
 # TMC field name that controls stall sensitivity, per driver family.
-# TMC2130/TMC2660/TMC5160 use a signed "sgt" field (config: driver_SGT).
-# TMC2208/TMC2209/TMC2226 use an unsigned "sgthrs" field
-# (config: driver_SGTHRS).
-# TMC2240 (StallGuard4, register SG4_THRS) is also exposed as "sgt"
-# (config: driver_SGT) — confirmed against a real printer.cfg.
+# TMC2130/TMC2660/TMC5160 use a signed "sgt" field, -64 to 63
+# (config: driver_SGT). Lower = more sensitive/easier to trigger.
+# TMC2208/TMC2209/TMC2226 use an unsigned "sg4_thrs" field, 0-255
+# (config: driver_SGTHRS in some Klipper versions). Higher = more
+# sensitive.
+# TMC2240 supports BOTH: "sgt" (signed, SpreadCycle-based homing,
+# the default and what most configs use) and "sg4_thrs" (unsigned,
+# only active if sg4_thrs is set non-zero, which switches Klipper to
+# SG4/StealthChop-based homing instead). KAST targets "sgt" for
+# TMC2240 since that's the default homing path; if a printer has been
+# deliberately switched to SG4 homing (sg4_thrs != 0), this module
+# will tune the wrong field and needs adjusting by hand.
 SGT_FIELD_BY_DRIVER = {
     'tmc2130': 'sgt',
     'tmc2660': 'sgt',
     'tmc5160': 'sgt',
-    'tmc2208': 'sgthrs',
-    'tmc2209': 'sgthrs',
-    'tmc2226': 'sgthrs',
+    'tmc2208': 'sg4_thrs',
+    'tmc2209': 'sg4_thrs',
+    'tmc2226': 'sg4_thrs',
     'tmc2240': 'sgt',
 }
 
