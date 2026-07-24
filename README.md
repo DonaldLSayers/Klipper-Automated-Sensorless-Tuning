@@ -10,6 +10,8 @@ It works by repeatedly homing an axis across a range of candidate values and sco
 
 The best-scoring combination gets reported, and can be staged into your config with `KAST_APPLY` + `SAVE_CONFIG`.
 
+New here? [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) walks through the whole process step by step. This README is more of a reference.
+
 ## Status
 
 Early / experimental. Test on a machine you can supervise, sweeping `driver_SGT` and current will home the axis many times in a row.
