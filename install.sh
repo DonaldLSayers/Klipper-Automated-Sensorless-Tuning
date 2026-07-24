@@ -18,6 +18,7 @@ KLIPPER_DIR="${KLIPPER_DIR:-$HOME/klipper}"
 KLIPPER_VENV="${KLIPPER_VENV:-$HOME/klippy-env}"
 PRINTER_DATA="${PRINTER_DATA:-$HOME/printer_data}"
 CONFIG_DIR="${CONFIG_DIR:-$PRINTER_DATA/config}"
+BACKUP_DIR="${BACKUP_DIR:-$HOME/kast-backups}"
 REPO_URL="https://github.com/DonaldLSayers/Klipper-Automated-Sensorless-Tuning.git"
 
 info() { echo "[kast-install] $1"; }
@@ -35,6 +36,19 @@ fi
 
 if ! systemctl list-units --all 2>/dev/null | grep -q "klipper"; then
     warn "couldn't find a klipper systemd service, continuing anyway"
+fi
+
+# 0. Back up the whole config folder before touching anything. This
+# installer only appends/symlinks, it never overwrites, but a backup
+# costs nothing and means a bad merge or a fat-fingered edit later is
+# never more than a copy away from undone.
+if [ -d "$CONFIG_DIR" ]; then
+    mkdir -p "$BACKUP_DIR"
+    BACKUP_FILE="$BACKUP_DIR/config-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "$BACKUP_FILE" -C "$(dirname "$CONFIG_DIR")" "$(basename "$CONFIG_DIR")"
+    info "backed up $CONFIG_DIR to $BACKUP_FILE"
+else
+    warn "no config dir found at $CONFIG_DIR yet, skipping backup"
 fi
 
 # 1. Clone or update the repo

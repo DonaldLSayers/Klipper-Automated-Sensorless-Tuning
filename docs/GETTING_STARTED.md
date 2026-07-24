@@ -6,7 +6,7 @@ If you just want the quick reference (command params, config options), see the m
 
 ## 0. Before you start
 
-- Back up your `printer.cfg`. `KAST_APPLY` writes to it via `SAVE_CONFIG`, same as any other Klipper calibration tool, but it's still worth having a copy.
+- `install.sh` backs up your whole config folder automatically before it touches anything. If you're installing by hand instead, back up `printer.cfg` yourself first: `KAST_APPLY` writes to it via `SAVE_CONFIG`, same as any other Klipper calibration tool.
 - Be near the printer, or watching a webcam, the first few times you run a sweep. Homing over and over at aggressive settings can occasionally overshoot before KAST catches it.
 - Sensorless homing tuning is inherently a bit knock-y and buzzy on the steppers. That's normal.
 
@@ -18,7 +18,7 @@ SSH into the host running klippy (the Pi, or wherever), and run:
 wget -O - https://raw.githubusercontent.com/DonaldLSayers/Klipper-Automated-Sensorless-Tuning/main/install.sh | bash
 ```
 
-This clones the repo to `~/kast`, symlinks `kast.py` into Klipper's `extras/` folder, symlinks the macros into your config folder and adds the `[include]` line for them, installs matplotlib into Klipper's venv (for auto-plotting), and registers KAST with Moonraker's update manager. It's safe to re-run any time, e.g. to pick up updates.
+It backs up your whole `printer_data/config` folder to `~/kast-backups/` before touching anything, then clones the repo to `~/kast`, symlinks `kast.py` into Klipper's `extras/` folder, symlinks the macros into your config folder and adds the `[include]` line for them, installs matplotlib into Klipper's venv (for auto-plotting), and registers KAST with Moonraker's update manager. It's safe to re-run any time, e.g. to pick up updates (each run makes a fresh backup too).
 
 If your install doesn't follow the usual MainsailOS/Fluidd layout, override paths with environment variables, e.g. `KLIPPER_DIR=/home/pi/klipper wget -O - .../install.sh | bash`. See the top of `install.sh` for all of them.
 

@@ -24,7 +24,7 @@ SSH into the machine running klippy and run:
 wget -O - https://raw.githubusercontent.com/DonaldLSayers/Klipper-Automated-Sensorless-Tuning/main/install.sh | bash
 ```
 
-This clones the repo to `~/kast`, symlinks `kast.py` into Klipper's `extras` folder, symlinks the macros into your config and adds the `[include]` line for them, installs matplotlib into Klipper's venv for auto-plotting, and registers KAST with Moonraker's update manager so it shows up for updates in Mainsail/Fluidd. Safe to re-run any time.
+First thing it does is tar up your whole `printer_data/config` folder to `~/kast-backups/`, before touching anything. Then it clones the repo to `~/kast`, symlinks `kast.py` into Klipper's `extras` folder, symlinks the macros into your config and adds the `[include]` line for them, installs matplotlib into Klipper's venv for auto-plotting, and registers KAST with Moonraker's update manager so it shows up for updates in Mainsail/Fluidd. Safe to re-run any time.
 
 It won't touch your `printer.cfg` beyond that one include line. You still need to:
 
