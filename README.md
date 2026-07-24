@@ -27,20 +27,28 @@ Early / experimental. Test on a machine you can supervise — sweeping
 
 ## Install
 
-1. Copy `klippy/extras/kast.py` into your Klipper install's
-   `klippy/extras/` directory (or symlink it).
-2. Copy `macros/kast.cfg` somewhere your `printer.cfg` can `[include]`
-   it. This installs KAST's own `[homing_override]` — if you already
-   have one (e.g. a hand-written CoreXY dual-motor homing macro), merge
-   its per-axis logic into `_KAST_HOME_AXIS` in `macros/kast.cfg`
-   instead of including both, or `KAST_CALIBRATE`'s current/speed
-   sweeps will get silently overridden by your macro's own hardcoded
-   values right before each homing move.
+Clone or symlink the **whole repo** into your Klipper config tree
+(e.g. `~/printer_data/config/kast`), rather than copying just
+`kast.py` — auto-plotting (below) locates `scripts/kast_plot.py`
+relative to `kast.py`'s own path and won't find it otherwise.
+
+1. Symlink `klippy/extras/kast.py` into your Klipper install's
+   `klippy/extras/` directory.
+2. `[include]` `macros/kast.cfg` from your `printer.cfg`. This installs
+   KAST's own `[homing_override]` — if you already have one (e.g. a
+   hand-written CoreXY dual-motor homing macro), merge its per-axis
+   logic into `_KAST_HOME_AXIS` in `macros/kast.cfg` instead of
+   including both, or `KAST_CALIBRATE`'s current/speed sweeps will get
+   silently overridden by your macro's own hardcoded values right
+   before each homing move.
 3. In `macros/kast.cfg`, set `variable_driver_x` / `variable_driver_y`
    in `_KAST_HOMING_STATE` to your actual TMC driver sections (e.g.
    `'tmc2209 stepper_x'`) if they aren't TMC2240.
 4. Add a `[kast]` section — see [docs/example-printer.cfg](docs/example-printer.cfg).
-5. Restart Klipper (`RESTART`).
+5. For auto-plotting, install matplotlib somewhere `python3` on the
+   host can see it (`pip install matplotlib` in Klipper's venv, or
+   system-wide). Not required otherwise — KAST still writes CSVs.
+6. Restart Klipper (`RESTART`).
 
 ## Usage
 
@@ -79,6 +87,19 @@ SAVE_CONFIG                     # write + restart
 `macros/kast.cfg` also provides `KAST_TUNE_X`, `KAST_TUNE_Y`, and
 `KAST_TUNE_ALL` as shortcuts.
 
+## Testing current settings
+
+To sanity-check whatever is *currently* configured — no sweeping, no
+changes — without running a full calibration:
+
+```
+KAST_TEST STEPPER=stepper_x AXIS=x SAMPLES=10
+```
+
+Useful after `SAVE_CONFIG`, after mechanical changes, or just to
+confirm a config is still reliable. `macros/kast.cfg` provides
+`KAST_TEST_X`, `KAST_TEST_Y`, and `KAST_TEST_ALL` shortcuts.
+
 ## Notes on TMC drivers
 
 KAST auto-detects the TMC driver behind each stepper and uses the
@@ -111,6 +132,30 @@ then restores the original value.
   homing override, KAST reports the best current instead and you apply
   it by hand to wherever your own macro sets it.
 
+## Results and graphs
+
+Every `KAST_CALIBRATE` run writes a CSV of all trials to
+`results_dir/<stepper_name>/kast_<stepper_name>_<timestamp>.csv`
+(default `results_dir`: `~/printer_data/config/kast_results`) — one
+subfolder per stepper, similar to how
+[klippain-shaketune](https://github.com/Frix-x/klippain-shaketune)
+organizes its resonance-test output.
+
+If `enable_plots` is on (default) and matplotlib is available, KAST
+launches `scripts/kast_plot.py` as a detached background process right
+after writing the CSV — it never blocks klippy's reactor, and a
+missing/slow matplotlib just means no PNG shows up, with the CSV kept
+either way. The PNG lands next to the CSV and plots score, success
+rate, and (if an ADXL345 was used) roughness, all against SGT, with
+one line per current/speed combination swept.
+
+To render a graph manually (e.g. from a workstation, or if
+auto-plotting is off):
+
+```
+python3 scripts/kast_plot.py results_dir/stepper_x/kast_stepper_x_1234567890.csv
+```
+
 ## ADXL345 (optional)
 
 If a `[adxl345]` (or `[adxl345 <name>]`) section exists, set
@@ -126,4 +171,4 @@ false` in `[kast]` to turn this off).
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPLv3 — see [LICENSE](LICENSE). Matches Klipper's own license.

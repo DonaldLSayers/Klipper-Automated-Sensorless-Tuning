@@ -6,11 +6,16 @@
 # homing trials and (optionally) ADXL345 vibration data as a quality
 # signal.
 #
-# License: MIT
+# License: GPLv3
 ########################################################################
 
+import csv
 import logging
+import os
 import statistics
+import subprocess
+import sys
+import time
 
 # TMC field name that controls stall sensitivity, per driver family.
 # TMC2130/TMC2660/TMC5160 use a signed "sgt" field, -64 to 63
@@ -216,7 +221,8 @@ class KASTStepperTuner:
 
     def boop(self, sgt):
         if self.kast.fun_mode:
-            line = BOOP_LINES[self._boop_i % len(BOOP_LINES)] % sgt
+            label = sgt if sgt is not None else "current settings"
+            line = BOOP_LINES[self._boop_i % len(BOOP_LINES)] % label
             self._boop_i += 1
             self.gcode.respond_info(line)
 
@@ -256,10 +262,12 @@ class KASTStepperTuner:
 
     def trial(self, sgt, current, homing_speed, samples):
         """Runs `samples` homing attempts at the given SGT/current/speed
-        and returns a score dict. Lower 'variance' and higher
-        'success_rate' is better; roughness (if available) penalizes
-        the score."""
-        self.driver.set_sgt(sgt)
+        and returns a score dict. sgt=None leaves driver_SGT untouched
+        (used by KAST_TEST to probe whatever is currently configured).
+        Lower 'variance' and higher 'success_rate' is better; roughness
+        (if available) penalizes the score."""
+        if sgt is not None:
+            self.driver.set_sgt(sgt)
         if current is not None:
             self.driver.set_current(current)
         self._set_homing_speed(homing_speed)
@@ -346,17 +354,84 @@ class KAST:
         self.accel = KASTAccelHelper(self.printer, accel_chip)
         self.default_samples = config.getint('samples', 5, minval=1)
         self.default_sgt_step = config.getint('sgt_step', 8, minval=1)
+        self.results_dir = os.path.expanduser(
+            config.get('results_dir', '~/printer_data/config/kast_results'))
+        self.enable_plots = config.getboolean('enable_plots', True)
+        # scripts/kast_plot.py, two levels up from klippy/extras/kast.py
+        # if the whole KAST repo was cloned/symlinked in (rather than
+        # just this one file being copied in).
+        default_plot_script = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            '..', '..', 'scripts', 'kast_plot.py'))
+        self.plot_script = config.get('plot_script', default_plot_script)
         self.last_results = {}
 
         self.gcode.register_command(
             'KAST_CALIBRATE', self.cmd_KAST_CALIBRATE,
             desc=self.cmd_KAST_CALIBRATE_help)
         self.gcode.register_command(
+            'KAST_TEST', self.cmd_KAST_TEST,
+            desc=self.cmd_KAST_TEST_help)
+        self.gcode.register_command(
             'KAST_STATUS', self.cmd_KAST_STATUS,
             desc=self.cmd_KAST_STATUS_help)
         self.gcode.register_command(
             'KAST_APPLY', self.cmd_KAST_APPLY,
             desc=self.cmd_KAST_APPLY_help)
+
+    def _write_csv(self, stepper_name, all_results):
+        """Dumps every trial from a calibration run to CSV, under
+        results_dir/<stepper_name>/, for later plotting. Best-effort: a
+        failure here shouldn't take down the calibration itself."""
+        try:
+            out_dir = os.path.join(self.results_dir, stepper_name)
+            if not os.path.exists(out_dir):
+                os.makedirs(out_dir)
+            path = os.path.join(
+                out_dir, "kast_%s_%d.csv" % (stepper_name, int(time.time())))
+            with open(path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'sgt', 'current', 'homing_speed', 'success_rate',
+                    'pos_stddev', 'roughness', 'score'])
+                for r in all_results:
+                    writer.writerow([
+                        r['sgt'],
+                        '' if r['current'] is None else r['current'],
+                        '' if r['homing_speed'] is None
+                        else r['homing_speed'],
+                        r['success_rate'], r['pos_stddev'],
+                        '' if r['roughness'] is None else r['roughness'],
+                        r['score']])
+            return path
+        except (IOError, OSError) as e:
+            logging.warning("KAST: could not write results CSV: %s", e)
+            return None
+
+    def _plot_async(self, csv_path):
+        """Fires scripts/kast_plot.py as a detached background process
+        (mirrors klippain-shaketune's approach) so a slow/missing
+        matplotlib on the host never blocks klippy's reactor. Returns
+        the PNG path this will attempt to write, or None if plotting
+        isn't available/enabled."""
+        if not self.enable_plots:
+            return None
+        if not os.path.isfile(self.plot_script):
+            logging.info(
+                "KAST: plot script not found at %s (copy the whole "
+                "KAST repo, not just kast.py, to enable auto-plots)",
+                self.plot_script)
+            return None
+        png_path = os.path.splitext(csv_path)[0] + '.png'
+        try:
+            subprocess.Popen(
+                [sys.executable, self.plot_script, csv_path,
+                 '-o', png_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            logging.warning("KAST: could not launch plot script: %s", e)
+            return None
+        return png_path
 
     cmd_KAST_CALIBRATE_help = (
         "Search for a reliable driver_SGT (and optionally home_current) "
@@ -425,6 +500,19 @@ class KAST:
             'driver_name': tuner.driver.driver_name,
         }
 
+        csv_path = self._write_csv(stepper_name, all_results)
+        if csv_path is not None:
+            png_path = self._plot_async(csv_path)
+            if png_path is not None:
+                gcmd.respond_info(
+                    "KAST: results saved to %s -- rendering graph to %s "
+                    "in the background." % (csv_path, png_path))
+            else:
+                gcmd.respond_info(
+                    "KAST: results saved to %s. Graph it with: "
+                    "python3 scripts/kast_plot.py %s"
+                    % (csv_path, csv_path))
+
         if best['success_rate'] < 1.0:
             gcmd.respond_info(
                 "KAST: no fully reliable SGT/current/speed combo found "
@@ -445,6 +533,36 @@ class KAST:
                 msg += ", roughness=%.3f" % best['roughness']
             msg += "). Run KAST_APPLY STEPPER=%s to save." % stepper_name
             gcmd.respond_info(msg)
+
+    cmd_KAST_TEST_help = (
+        "Repeatedly home a stepper at its CURRENT driver_SGT/current/"
+        "speed (no sweeping, nothing is changed) to sanity-check "
+        "reliability")
+
+    def cmd_KAST_TEST(self, gcmd):
+        stepper_name = gcmd.get('STEPPER')
+        axis = gcmd.get('AXIS', stepper_name[-1] if stepper_name else 'x')
+        samples = gcmd.get_int('SAMPLES', self.default_samples, minval=1)
+
+        tuner = KASTStepperTuner(self, stepper_name, axis, config_section=None)
+        gcmd.respond_info(
+            "KAST: testing '%s' as currently configured -- %d homing "
+            "attempts, nothing will be changed." % (stepper_name, samples))
+
+        result = tuner.trial(None, None, None, samples)
+
+        msg = ("KAST: '%s' success_rate=%.0f%% pos_stddev=%.4f"
+               % (stepper_name, result['success_rate'] * 100,
+                  result['pos_stddev']))
+        if result['roughness'] is not None:
+            msg += " roughness=%.3f" % result['roughness']
+        if result['success_rate'] < 1.0 and result['last_error']:
+            msg += " last_error=%r" % result['last_error']
+        gcmd.respond_info(msg)
+        if result['success_rate'] < 1.0:
+            gcmd.respond_info(
+                "KAST: current settings are NOT fully reliable for '%s'. "
+                "Consider running KAST_CALIBRATE." % stepper_name)
 
     cmd_KAST_STATUS_help = "Show the last KAST_CALIBRATE result(s)"
 
