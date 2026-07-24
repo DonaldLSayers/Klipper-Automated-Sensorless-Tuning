@@ -44,7 +44,7 @@ Optional parameters:
 | Param | Default | Meaning |
 |---|---|---|
 | `AXIS` | last char of `STEPPER` | Axis letter to home (`x`/`y`/`z`) |
-| `SGT_MIN` / `SGT_MAX` | `-64` / `63` | Sweep range for `driver_SGT` |
+| `SGT_MIN` / `SGT_MAX` | driver-dependent | Sweep range for the stall-sensitivity field. `-64`/`63` for signed `sgt` drivers (tmc2130/2660/5160/2240), `0`/`255` for unsigned `sg4_thrs` drivers (tmc2208/2209/2226) |
 | `SGT_STEP` | `8` (config `sgt_step`) | Step size across the sweep |
 | `SAMPLES` | `5` (config `samples`) | Homing attempts per candidate |
 | `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep `home_current` (amps) over this range |
@@ -66,8 +66,13 @@ SAVE_CONFIG                     # write + restart
 KAST auto-detects the TMC driver behind each stepper and uses the
 correct StallGuard field:
 
-- TMC2130 / TMC2660 / TMC5160 → `sgt` (signed, config `driver_SGT`)
-- TMC2208 / TMC2209 / TMC2226 → `sgthrs` (unsigned, config `driver_SGTHRS`)
+- TMC2130 / TMC2660 / TMC5160 / TMC2240 → `sgt` (signed, -64 to 63, config `driver_SGT`)
+- TMC2208 / TMC2209 / TMC2226 → `sg4_thrs` (unsigned, 0 to 255, config `driver_SGTHRS`)
+
+On TMC2240, `sgt` drives the default SpreadCycle-based sensorless
+homing path. TMC2240 also has a separate `sg4_thrs` field that only
+takes effect if you've deliberately switched to SG4/StealthChop-based
+homing (non-zero `sg4_thrs`); KAST does not target that mode.
 
 Values are applied live via Klipper's built-in `SET_TMC_FIELD` /
 `SET_TMC_CURRENT` commands, so no driver-specific code lives in KAST

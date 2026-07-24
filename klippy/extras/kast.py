@@ -37,6 +37,23 @@ SGT_FIELD_BY_DRIVER = {
 
 SGT_SIGNED_DRIVERS = ('tmc2130', 'tmc2660', 'tmc5160')
 
+# printer.cfg option name to persist the value under (KAST_APPLY),
+# and the valid value range for that field.
+CONFIG_KEY_BY_DRIVER = {
+    'tmc2130': 'driver_SGT',
+    'tmc2660': 'driver_SGT',
+    'tmc5160': 'driver_SGT',
+    'tmc2208': 'driver_SGTHRS',
+    'tmc2209': 'driver_SGTHRS',
+    'tmc2226': 'driver_SGTHRS',
+    'tmc2240': 'driver_SGT',
+}
+SGT_RANGE_BY_DRIVER = {
+    driver_type: ((-64, 63) if driver_type in SGT_SIGNED_DRIVERS
+                  else (0, 255))
+    for driver_type in SGT_FIELD_BY_DRIVER
+}
+
 # Fun, low-stakes console chatter so long sweeps don't feel silent.
 BOOP_LINES = [
     "*boop* testing SGT=%s...",
@@ -68,6 +85,8 @@ class KASTDriverAdapter:
                 "support sensorless homing (StallGuard)."
                 % (stepper_name, self.driver_type))
         self.sgt_signed = self.driver_type in SGT_SIGNED_DRIVERS
+        self.config_key = CONFIG_KEY_BY_DRIVER[self.driver_type]
+        self.sgt_range = SGT_RANGE_BY_DRIVER[self.driver_type]
 
     def _find_driver(self):
         for driver_type in SGT_FIELD_BY_DRIVER:
@@ -276,13 +295,25 @@ class KAST:
     def cmd_KAST_CALIBRATE(self, gcmd):
         stepper_name = gcmd.get('STEPPER')
         axis = gcmd.get('AXIS', stepper_name[-1] if stepper_name else 'x')
-        sgt_min = gcmd.get_int('SGT_MIN', -64)
-        sgt_max = gcmd.get_int('SGT_MAX', 63)
         sgt_step = gcmd.get_int('SGT_STEP', self.default_sgt_step, minval=1)
         samples = gcmd.get_int('SAMPLES', self.default_samples, minval=1)
         current_min = gcmd.get_float('CURRENT_MIN', None)
         current_max = gcmd.get_float('CURRENT_MAX', None)
         current_step = gcmd.get_float('CURRENT_STEP', 0.1, above=0.0)
+
+        if self.fun_mode:
+            gcmd.respond_info(
+                "KAST warming up for '%s'... hold onto your belts!"
+                % stepper_name)
+
+        tuner = KASTStepperTuner(self, stepper_name, axis, config_section=None)
+
+        # Default sweep range depends on the driver's SGT field: signed
+        # -64..63 for tmc2130/2660/5160/2240 ("sgt"), unsigned 0..255
+        # for tmc2208/2209/2226 ("sg4_thrs").
+        range_min, range_max = tuner.driver.sgt_range
+        sgt_min = gcmd.get_int('SGT_MIN', range_min)
+        sgt_max = gcmd.get_int('SGT_MAX', range_max)
 
         if current_min is not None and current_max is not None:
             currents = []
@@ -293,18 +324,13 @@ class KAST:
         else:
             currents = [None]
 
-        if self.fun_mode:
-            gcmd.respond_info(
-                "KAST warming up for '%s'... hold onto your belts!"
-                % stepper_name)
-
-        tuner = KASTStepperTuner(self, stepper_name, axis, config_section=None)
         best, all_results = tuner.search(
             sgt_min, sgt_max, sgt_step, currents, samples)
 
         self.last_results[stepper_name] = {
             'best': best,
             'all': all_results,
+            'config_key': tuner.driver.config_key,
         }
 
         if best['success_rate'] < 1.0:
@@ -352,14 +378,14 @@ class KAST:
                 "KAST_CALIBRATE first." % stepper_name)
         best = data['best']
         configfile = self.printer.lookup_object('configfile')
-        configfile.set(stepper_name, 'driver_SGT', str(best['sgt']))
+        configfile.set(stepper_name, data['config_key'], str(best['sgt']))
         if best['current'] is not None:
             configfile.set(stepper_name, 'home_current',
                             "%.3f" % best['current'])
         gcmd.respond_info(
-            "KAST: staged driver_SGT=%s%s for [%s]. Run SAVE_CONFIG to "
+            "KAST: staged %s=%s%s for [%s]. Run SAVE_CONFIG to "
             "write it out and restart."
-            % (best['sgt'],
+            % (data['config_key'], best['sgt'],
                (" and home_current=%.3f" % best['current'])
                if best['current'] is not None else "",
                stepper_name))
