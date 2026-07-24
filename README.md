@@ -2,8 +2,9 @@
 
 KAST is a [Klipper](https://www.klipper3d.org/) `extras` module that
 automatically searches for a reliable `driver_SGT` (StallGuard
-sensitivity) and, optionally, `home_current` for sensorless-homing
-steppers — instead of hand-tuning by trial and error.
+sensitivity) and, optionally, homing current and homing speed for
+sensorless-homing steppers — instead of hand-tuning by trial and
+error.
 
 It works by repeatedly homing an axis across a range of candidate
 values and scoring each one on:
@@ -29,9 +30,17 @@ Early / experimental. Test on a machine you can supervise — sweeping
 1. Copy `klippy/extras/kast.py` into your Klipper install's
    `klippy/extras/` directory (or symlink it).
 2. Copy `macros/kast.cfg` somewhere your `printer.cfg` can `[include]`
-   it.
-3. Add a `[kast]` section — see [docs/example-printer.cfg](docs/example-printer.cfg).
-4. Restart Klipper (`RESTART`).
+   it. This installs KAST's own `[homing_override]` — if you already
+   have one (e.g. a hand-written CoreXY dual-motor homing macro), merge
+   its per-axis logic into `_KAST_HOME_AXIS` in `macros/kast.cfg`
+   instead of including both, or `KAST_CALIBRATE`'s current/speed
+   sweeps will get silently overridden by your macro's own hardcoded
+   values right before each homing move.
+3. In `macros/kast.cfg`, set `variable_driver_x` / `variable_driver_y`
+   in `_KAST_HOMING_STATE` to your actual TMC driver sections (e.g.
+   `'tmc2209 stepper_x'`) if they aren't TMC2240.
+4. Add a `[kast]` section — see [docs/example-printer.cfg](docs/example-printer.cfg).
+5. Restart Klipper (`RESTART`).
 
 ## Usage
 
@@ -47,8 +56,17 @@ Optional parameters:
 | `SGT_MIN` / `SGT_MAX` | driver-dependent | Sweep range for the stall-sensitivity field. `-64`/`63` for signed `sgt` drivers (tmc2130/2660/5160/2240), `0`/`255` for unsigned `sg4_thrs` drivers (tmc2208/2209/2226) |
 | `SGT_STEP` | `8` (config `sgt_step`) | Step size across the sweep |
 | `SAMPLES` | `5` (config `samples`) | Homing attempts per candidate |
-| `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep `home_current` (amps) over this range |
+| `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep homing current (amps) over this range |
 | `CURRENT_STEP` | `0.1` | Step size for the current sweep |
+| `HOMING_SPEED_MIN` / `HOMING_SPEED_MAX` | unset | Also sweep homing speed (mm/s) over this range |
+| `HOMING_SPEED_STEP` | `5.0` | Step size for the speed sweep |
+
+StallGuard sensitivity is velocity-dependent — an SGT that's reliable
+at one homing speed may not be at another — so if you care about a
+specific `homing_speed`, it's worth sweeping SGT at that speed rather
+than assuming a value tuned elsewhere carries over. Sweeping all three
+dimensions (SGT × current × speed) multiplies trial count fast; KAST
+prints an estimated homing-move count before starting.
 
 Then:
 
@@ -76,7 +94,22 @@ homing (non-zero `sg4_thrs`); KAST does not target that mode.
 
 Values are applied live via Klipper's built-in `SET_TMC_FIELD` /
 `SET_TMC_CURRENT` commands, so no driver-specific code lives in KAST
-itself.
+itself. Homing speed has no equivalent gcode command — Klipper fixes
+it at config-parse time — so KAST overrides it by writing directly to
+the axis's `PrinterRail` object in memory for the duration of a sweep,
+then restores the original value.
+
+## What KAST_APPLY persists, and where
+
+- `driver_SGT` / `driver_SGTHRS` (the field KAST tuned) → the driver's
+  own config section, e.g. `[tmc2240 stepper_x]`.
+- `homing_speed`, if swept → the stepper's section, e.g. `[stepper_x]`
+  (this is a real Klipper config option).
+- Homing current, if swept → `variable_home_current` in
+  `[gcode_macro _KAST_HOMING_STATE]`, since Klipper has no native
+  `home_current` config field. If you're not using `macros/kast.cfg`'s
+  homing override, KAST reports the best current instead and you apply
+  it by hand to wherever your own macro sets it.
 
 ## ADXL345 (optional)
 

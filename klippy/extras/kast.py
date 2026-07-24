@@ -108,6 +108,52 @@ class KASTDriverAdapter:
         self.gcode.run_script_from_command(
             "SET_TMC_CURRENT STEPPER=%s CURRENT=%.3f"
             % (self.stepper_name, current))
+        # Also sync KAST's shared homing-state variable, in case a
+        # [homing_override] (e.g. macros/kast.cfg's _KAST_HOME_AXIS)
+        # re-applies its own homing current right before G28 runs --
+        # otherwise the SET_TMC_CURRENT above gets clobbered before it
+        # ever takes effect. No-op if that macro isn't in use.
+        if self.printer.lookup_object(
+                'gcode_macro _KAST_HOMING_STATE', None) is not None:
+            self.gcode.run_script_from_command(
+                "SET_GCODE_VARIABLE MACRO=_KAST_HOMING_STATE "
+                "VARIABLE=home_current VALUE=%.3f" % current)
+
+
+class KASTHomingSpeedOverride:
+    """Temporarily overrides a stepper's homing speed by reaching into
+    its PrinterRail. Klipper has no gcode command for this (homing
+    speed is normally fixed at config-parse time), so this pokes the
+    in-memory rail object directly -- the same value Homing.home_rails()
+    reads at G28 time. Only works for kinematics that expose `.rails`
+    (cartesian, corexy, hybrid_corexy, etc.)."""
+
+    def __init__(self, printer, stepper_name):
+        self.rail = self._find_rail(printer, stepper_name)
+        self.orig_speed = None
+
+    @staticmethod
+    def _find_rail(printer, stepper_name):
+        toolhead = printer.lookup_object('toolhead')
+        kin = toolhead.get_kinematics()
+        for rail in getattr(kin, 'rails', []):
+            for stepper in rail.get_steppers():
+                if stepper.get_name() == stepper_name:
+                    return rail
+        raise KASTError(
+            "KAST: could not find a homing rail for stepper '%s' "
+            "(homing-speed sweeps need cartesian-style kinematics)."
+            % stepper_name)
+
+    def set(self, speed):
+        if self.orig_speed is None:
+            self.orig_speed = self.rail.homing_speed
+        self.rail.homing_speed = speed
+
+    def restore(self):
+        if self.orig_speed is not None:
+            self.rail.homing_speed = self.orig_speed
+            self.orig_speed = None
 
 
 class KASTAccelHelper:
@@ -166,6 +212,7 @@ class KASTStepperTuner:
         self.axis = axis
         self.driver = KASTDriverAdapter(self.printer, stepper_name)
         self.accel = kast.accel
+        self._speed_override = None
 
     def boop(self, sgt):
         if self.kast.fun_mode:
@@ -181,6 +228,18 @@ class KASTStepperTuner:
 
     _boop_i = 0
 
+    def _set_homing_speed(self, speed):
+        if speed is None:
+            return
+        if self._speed_override is None:
+            self._speed_override = KASTHomingSpeedOverride(
+                self.printer, self.stepper_name)
+        self._speed_override.set(speed)
+
+    def restore_homing_speed(self):
+        if self._speed_override is not None:
+            self._speed_override.restore()
+
     def _home_once(self):
         """Homes just this stepper's axis and reports whether it
         succeeded, plus the triggered position (for repeatability
@@ -195,13 +254,15 @@ class KASTStepperTuner:
         idx = {'x': 0, 'y': 1, 'z': 2}[self.axis.lower()]
         return True, pos[idx], None
 
-    def trial(self, sgt, current, samples):
-        """Runs `samples` homing attempts at the given SGT/current and
-        returns a score dict. Lower 'variance' and higher 'success_rate'
-        is better; roughness (if available) penalizes the score."""
+    def trial(self, sgt, current, homing_speed, samples):
+        """Runs `samples` homing attempts at the given SGT/current/speed
+        and returns a score dict. Lower 'variance' and higher
+        'success_rate' is better; roughness (if available) penalizes
+        the score."""
         self.driver.set_sgt(sgt)
         if current is not None:
             self.driver.set_current(current)
+        self._set_homing_speed(homing_speed)
         self.boop(sgt)
 
         successes = 0
@@ -234,6 +295,7 @@ class KASTStepperTuner:
         return {
             'sgt': sgt,
             'current': current,
+            'homing_speed': homing_speed,
             'success_rate': success_rate,
             'pos_stddev': pos_stddev,
             'roughness': avg_roughness,
@@ -241,21 +303,29 @@ class KASTStepperTuner:
             'last_error': last_error,
         }
 
-    def sweep(self, sgt_min, sgt_max, sgt_step, current, samples):
+    def sweep(self, sgt_min, sgt_max, sgt_step, current, homing_speed,
+              samples):
         results = []
         sgt = sgt_min
         while sgt <= sgt_max:
-            results.append(self.trial(sgt, current, samples))
+            results.append(self.trial(sgt, current, homing_speed, samples))
             sgt += sgt_step
         return results
 
-    def search(self, sgt_min, sgt_max, sgt_step, currents, samples):
-        """Coarse sweep of SGT for each candidate current; returns the
-        best overall result plus the full result table."""
+    def search(self, sgt_min, sgt_max, sgt_step, currents, homing_speeds,
+               samples):
+        """Coarse sweep of SGT for each candidate current/speed
+        combination; returns the best overall result plus the full
+        result table."""
         all_results = []
-        for current in currents:
-            all_results.extend(
-                self.sweep(sgt_min, sgt_max, sgt_step, current, samples))
+        try:
+            for current in currents:
+                for homing_speed in homing_speeds:
+                    all_results.extend(
+                        self.sweep(sgt_min, sgt_max, sgt_step, current,
+                                   homing_speed, samples))
+        finally:
+            self.restore_homing_speed()
         # Prefer fully-reliable results, then best (lowest) score among
         # those, biased toward the middle of a reliable run so we don't
         # pick the very edge of the working range.
@@ -300,6 +370,9 @@ class KAST:
         current_min = gcmd.get_float('CURRENT_MIN', None)
         current_max = gcmd.get_float('CURRENT_MAX', None)
         current_step = gcmd.get_float('CURRENT_STEP', 0.1, above=0.0)
+        speed_min = gcmd.get_float('HOMING_SPEED_MIN', None, above=0.0)
+        speed_max = gcmd.get_float('HOMING_SPEED_MAX', None, above=0.0)
+        speed_step = gcmd.get_float('HOMING_SPEED_STEP', 5.0, above=0.0)
 
         if self.fun_mode:
             gcmd.respond_info(
@@ -324,28 +397,49 @@ class KAST:
         else:
             currents = [None]
 
+        if speed_min is not None and speed_max is not None:
+            homing_speeds = []
+            s = speed_min
+            while s <= speed_max + 1e-9:
+                homing_speeds.append(round(s, 3))
+                s += speed_step
+        else:
+            homing_speeds = [None]
+
+        total_trials = (
+            ((sgt_max - sgt_min) // sgt_step + 1)
+            * len(currents) * len(homing_speeds) * samples)
+        gcmd.respond_info(
+            "KAST: about to run ~%d homing moves for '%s'. This can take "
+            "a while and will heat up the motor -- interrupt with an "
+            "emergency stop if something looks wrong."
+            % (total_trials, stepper_name))
+
         best, all_results = tuner.search(
-            sgt_min, sgt_max, sgt_step, currents, samples)
+            sgt_min, sgt_max, sgt_step, currents, homing_speeds, samples)
 
         self.last_results[stepper_name] = {
             'best': best,
             'all': all_results,
             'config_key': tuner.driver.config_key,
+            'driver_name': tuner.driver.driver_name,
         }
 
         if best['success_rate'] < 1.0:
             gcmd.respond_info(
-                "KAST: no fully reliable SGT/current combo found for "
-                "'%s'. Best attempt: SGT=%s CURRENT=%s "
+                "KAST: no fully reliable SGT/current/speed combo found "
+                "for '%s'. Best attempt: SGT=%s CURRENT=%s SPEED=%s "
                 "(success_rate=%.0f%%). Consider widening the search "
                 "range or checking mechanics."
                 % (stepper_name, best['sgt'], best['current'],
-                   best['success_rate'] * 100))
+                   best['homing_speed'], best['success_rate'] * 100))
         else:
             msg = ("KAST: best result for '%s' -> SGT=%s"
                    % (stepper_name, best['sgt']))
             if best['current'] is not None:
                 msg += " CURRENT=%.2fA" % best['current']
+            if best['homing_speed'] is not None:
+                msg += " SPEED=%.1fmm/s" % best['homing_speed']
             msg += (" (pos_stddev=%.4f" % best['pos_stddev'])
             if best['roughness'] is not None:
                 msg += ", roughness=%.3f" % best['roughness']
@@ -361,13 +455,15 @@ class KAST:
         for stepper_name, data in self.last_results.items():
             best = data['best']
             gcmd.respond_info(
-                "%s: SGT=%s CURRENT=%s success_rate=%.0f%% score=%.2f"
+                "%s: SGT=%s CURRENT=%s SPEED=%s success_rate=%.0f%% "
+                "score=%.2f"
                 % (stepper_name, best['sgt'], best['current'],
-                   best['success_rate'] * 100, best['score']))
+                   best['homing_speed'], best['success_rate'] * 100,
+                   best['score']))
 
     cmd_KAST_APPLY_help = (
         "Persist the last KAST_CALIBRATE result for a stepper into the "
-        "saved config section (requires SAVE_CONFIG afterwards)")
+        "saved config (requires SAVE_CONFIG afterwards)")
 
     def cmd_KAST_APPLY(self, gcmd):
         stepper_name = gcmd.get('STEPPER')
@@ -378,17 +474,32 @@ class KAST:
                 "KAST_CALIBRATE first." % stepper_name)
         best = data['best']
         configfile = self.printer.lookup_object('configfile')
-        configfile.set(stepper_name, data['config_key'], str(best['sgt']))
+        applied = ["%s=%s" % (data['config_key'], best['sgt'])]
+        # driver_SGT / driver_SGTHRS live under the driver's own config
+        # section (e.g. "tmc2240 stepper_x"), not the stepper section.
+        configfile.set(data['driver_name'], data['config_key'],
+                        str(best['sgt']))
+        if best['homing_speed'] is not None:
+            configfile.set(stepper_name, 'homing_speed',
+                            "%.3f" % best['homing_speed'])
+            applied.append("homing_speed=%.3f" % best['homing_speed'])
         if best['current'] is not None:
-            configfile.set(stepper_name, 'home_current',
-                            "%.3f" % best['current'])
+            if self.printer.lookup_object(
+                    'gcode_macro _KAST_HOMING_STATE', None) is not None:
+                configfile.set('gcode_macro _KAST_HOMING_STATE',
+                                'variable_home_current',
+                                "%.3f" % best['current'])
+                applied.append("home_current=%.3f" % best['current'])
+            else:
+                gcmd.respond_info(
+                    "KAST: best homing current was %.3fA, but there's no "
+                    "'home_current' config field in Klipper and no "
+                    "_KAST_HOMING_STATE macro found to persist it into -- "
+                    "apply it by hand in whatever sets your homing "
+                    "current." % best['current'])
         gcmd.respond_info(
-            "KAST: staged %s=%s%s for [%s]. Run SAVE_CONFIG to "
-            "write it out and restart."
-            % (data['config_key'], best['sgt'],
-               (" and home_current=%.3f" % best['current'])
-               if best['current'] is not None else "",
-               stepper_name))
+            "KAST: staged %s for [%s]. Run SAVE_CONFIG to write it out "
+            "and restart." % (", ".join(applied), stepper_name))
 
 
 def load_config_prefix(config):
