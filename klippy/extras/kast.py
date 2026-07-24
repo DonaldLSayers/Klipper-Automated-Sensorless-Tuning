@@ -409,11 +409,26 @@ class KASTStepperTuner:
         KASTSafeZoneTester: ok=True means no false trigger during the
         back-and-forth test move, not "homed successfully". pos is
         always None here, position isn't diagnostic in the same way
-        when every attempt returns to the same bed-center reference."""
+        when every attempt returns to the same bed-center reference.
+
+        A gcode.error (e.g. "no trigger") is an ordinary, understood
+        outcome and is recorded as a normal failed trial, the search
+        just continues. Anything else is unexpected in code this new,
+        and might leave the toolhead mid-move rather than back at
+        center, so it's treated as unsafe to continue from and aborts
+        the whole calibration (KASTUnsafeAbort) rather than silently
+        testing further values from an unknown position. Logged via
+        logging.exception either way so it's visible in klippy.log."""
         try:
             ok, err = self.safe_tester.test()
         except self.gcode.error as e:
             return False, None, str(e)
+        except Exception as e:
+            logging.exception("KAST: unexpected error during safe-zone test")
+            raise KASTUnsafeAbort(
+                "unexpected error during safe-zone test, stopping rather "
+                "than continue from a possibly-unknown toolhead position: "
+                "%s" % e)
         return ok, None, err
 
     def trial(self, sgt, current, homing_speed, samples):
@@ -670,6 +685,15 @@ class KAST:
             'SQUARE_SIZE', self.default_safe_zone_square, above=0.0)
         safe_zone_speed = gcmd.get_float(
             'SAFE_ZONE_SPEED', self.default_safe_zone_speed, above=0.0)
+
+        toolhead = self.printer.lookup_object('toolhead')
+        eventtime = self.printer.get_reactor().monotonic()
+        homed_axes = toolhead.get_status(eventtime).get('homed_axes', '')
+        if axis.lower() not in homed_axes:
+            raise gcmd.error(
+                "KAST: '%s' isn't homed yet. KAST_CALIBRATE moves to bed "
+                "center before testing, which needs a real position to "
+                "move from. Run G28 first." % axis.upper())
 
         if self.fun_mode:
             gcmd.respond_info(
