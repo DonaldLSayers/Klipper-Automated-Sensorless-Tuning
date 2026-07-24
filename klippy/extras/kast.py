@@ -500,10 +500,24 @@ class KAST:
             else:
                 default_min = current_sgt
                 default_max = min(range_max, current_sgt + radius)
+            gcmd.respond_info(
+                "KAST: found configured %s=%d on [%s], defaulting to "
+                "SGT %d..%d" % (tuner.driver.config_key, current_sgt,
+                                 tuner.driver.driver_name, default_min,
+                                 default_max))
         else:
             default_min, default_max = range_min, range_max
+            gcmd.respond_info(
+                "KAST: no configured %s found on [%s], defaulting to "
+                "the full range %d..%d"
+                % (tuner.driver.config_key, tuner.driver.driver_name,
+                   default_min, default_max))
         sgt_min = gcmd.get_int('SGT_MIN', default_min)
         sgt_max = gcmd.get_int('SGT_MAX', default_max)
+        if sgt_min != default_min or sgt_max != default_max:
+            gcmd.respond_info(
+                "KAST: SGT_MIN/SGT_MAX given explicitly, overriding the "
+                "default -> sweeping %d..%d" % (sgt_min, sgt_max))
 
         if current_min is not None and current_max is not None:
             currents = []
