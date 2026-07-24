@@ -1,0 +1,91 @@
+# KAST — Klipper Automated Sensorless Tuning
+
+KAST is a [Klipper](https://www.klipper3d.org/) `extras` module that
+automatically searches for a reliable `driver_SGT` (StallGuard
+sensitivity) and, optionally, `home_current` for sensorless-homing
+steppers — instead of hand-tuning by trial and error.
+
+It works by repeatedly homing an axis across a range of candidate
+values and scoring each one on:
+
+- **Reliability** — did the axis home successfully every time?
+- **Repeatability** — how consistent is the triggered position across
+  attempts?
+- **Smoothness** *(optional)* — if an ADXL345 accelerometer is
+  configured, KAST samples vibration during each homing move and
+  penalizes candidates that look mechanically rough (a sign of near-miss
+  stall detection or skipped steps), even if they technically "worked".
+
+The best-scoring combination is reported, and can be staged into your
+config with `KAST_APPLY` + `SAVE_CONFIG`.
+
+## Status
+
+Early / experimental. Test on a machine you can supervise — sweeping
+`driver_SGT` and current will home the axis many times in a row.
+
+## Install
+
+1. Copy `klippy/extras/kast.py` into your Klipper install's
+   `klippy/extras/` directory (or symlink it).
+2. Copy `macros/kast.cfg` somewhere your `printer.cfg` can `[include]`
+   it.
+3. Add a `[kast]` section — see [docs/example-printer.cfg](docs/example-printer.cfg).
+4. Restart Klipper (`RESTART`).
+
+## Usage
+
+```
+KAST_CALIBRATE STEPPER=stepper_x AXIS=x
+```
+
+Optional parameters:
+
+| Param | Default | Meaning |
+|---|---|---|
+| `AXIS` | last char of `STEPPER` | Axis letter to home (`x`/`y`/`z`) |
+| `SGT_MIN` / `SGT_MAX` | `-64` / `63` | Sweep range for `driver_SGT` |
+| `SGT_STEP` | `8` (config `sgt_step`) | Step size across the sweep |
+| `SAMPLES` | `5` (config `samples`) | Homing attempts per candidate |
+| `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep `home_current` (amps) over this range |
+| `CURRENT_STEP` | `0.1` | Step size for the current sweep |
+
+Then:
+
+```
+KAST_STATUS                     # show last result(s)
+KAST_APPLY STEPPER=stepper_x    # stage best values into saved config
+SAVE_CONFIG                     # write + restart
+```
+
+`macros/kast.cfg` also provides `KAST_TUNE_X`, `KAST_TUNE_Y`, and
+`KAST_TUNE_ALL` as shortcuts.
+
+## Notes on TMC drivers
+
+KAST auto-detects the TMC driver behind each stepper and uses the
+correct StallGuard field:
+
+- TMC2130 / TMC2660 / TMC5160 → `sgt` (signed, config `driver_SGT`)
+- TMC2208 / TMC2209 / TMC2226 → `sgthrs` (unsigned, config `driver_SGTHRS`)
+
+Values are applied live via Klipper's built-in `SET_TMC_FIELD` /
+`SET_TMC_CURRENT` commands, so no driver-specific code lives in KAST
+itself.
+
+## ADXL345 (optional)
+
+If a `[adxl345]` (or `[adxl345 <name>]`) section exists, set
+`accel_chip` in `[kast]` accordingly (`default` for the unnamed
+section). KAST will fold vibration data into its scoring automatically.
+Without an accelerometer, KAST still works — it just scores purely on
+homing success/repeatability.
+
+## Fun mode
+
+Long sweeps get chatty status messages by default (set `fun_mode:
+false` in `[kast]` to turn this off).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
