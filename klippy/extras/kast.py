@@ -40,7 +40,7 @@ SGT_FIELD_BY_DRIVER = {
     'tmc2240': 'sgt',
 }
 
-SGT_SIGNED_DRIVERS = ('tmc2130', 'tmc2660', 'tmc5160')
+SGT_SIGNED_DRIVERS = ('tmc2130', 'tmc2660', 'tmc5160', 'tmc2240')
 
 # printer.cfg option name to persist the value under (KAST_APPLY),
 # and the valid value range for that field.
