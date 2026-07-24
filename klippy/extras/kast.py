@@ -74,6 +74,16 @@ class KASTError(Exception):
     pass
 
 
+class KASTUnsafeAbort(Exception):
+    """Raised when a homing move looks physically unsafe to continue
+    from (e.g. a suspiciously short move suggesting a false StallGuard
+    trigger, see macros/kast.cfg's min_home_travel check). Unlike an
+    ordinary failed homing attempt, this aborts the entire calibration
+    immediately rather than being recorded as one failed sample and
+    continuing on to the next trial."""
+    pass
+
+
 class KASTDriverAdapter:
     """Wraps SET_TMC_FIELD / SET_TMC_CURRENT gcode commands so KAST does
     not need to know about individual TMC driver module internals."""
@@ -276,7 +286,10 @@ class KASTStepperTuner:
             self.gcode.run_script_from_command(
                 "G28 %s" % self.axis.upper())
         except self.gcode.error as e:
-            return False, None, str(e)
+            msg = str(e)
+            if 'KAST_UNSAFE_TRIGGER' in msg:
+                raise KASTUnsafeAbort(msg)
+            return False, None, msg
         toolhead = self.printer.lookup_object('toolhead')
         pos = toolhead.get_position()
         idx = {'x': 0, 'y': 1, 'z': 2}[self.axis.lower()]
@@ -310,6 +323,7 @@ class KASTStepperTuner:
                 last_error = err
 
         success_rate = successes / float(samples)
+        mean_pos = sum(positions) / len(positions) if positions else None
         pos_stddev = (statistics.pstdev(positions)
                       if len(positions) > 1 else 0.0)
         avg_roughness = (sum(roughness_vals) / len(roughness_vals)
@@ -327,6 +341,7 @@ class KASTStepperTuner:
             'current': current,
             'homing_speed': homing_speed,
             'success_rate': success_rate,
+            'mean_pos': mean_pos,
             'pos_stddev': pos_stddev,
             'roughness': avg_roughness,
             'score': score,
@@ -342,18 +357,59 @@ class KASTStepperTuner:
             sgt += sgt_step
         return results
 
+    def walk_from_baseline(self, baseline_sgt, sgt_min, sgt_max, sgt_step,
+                            current, homing_speed, samples, max_drift):
+        """Tests baseline_sgt first to establish a trustworthy reference
+        position, then steps one sgt_step at a time away from it in
+        each direction the [sgt_min, sgt_max] range actually covers,
+        stopping in that direction the moment a step isn't fully
+        reliable or its homed position drifts from the reference by
+        more than max_drift. This bounds exploration to only as far
+        as the printer actually keeps working reliably, instead of
+        committing to a fixed range regardless of what happens along
+        the way -- important because a value that's briefly unreliable
+        (e.g. a false StallGuard trigger) can otherwise compound into
+        real physical drift over the following trials."""
+        results = []
+        baseline = self.trial(baseline_sgt, current, homing_speed, samples)
+        results.append(baseline)
+        if baseline['success_rate'] < 1.0 or baseline['mean_pos'] is None:
+            return results
+        reference_pos = baseline['mean_pos']
+
+        for direction in (-1, 1):
+            sgt = baseline_sgt + direction * sgt_step
+            while sgt_min <= sgt <= sgt_max:
+                r = self.trial(sgt, current, homing_speed, samples)
+                results.append(r)
+                if r['success_rate'] < 1.0:
+                    break
+                if (r['mean_pos'] is not None
+                        and abs(r['mean_pos'] - reference_pos) > max_drift):
+                    break
+                sgt += direction * sgt_step
+        return results
+
     def search(self, sgt_min, sgt_max, sgt_step, currents, homing_speeds,
-               samples):
-        """Coarse sweep of SGT for each candidate current/speed
-        combination; returns the best overall result plus the full
-        result table."""
+               samples, baseline_sgt=None, max_drift=2.0):
+        """Searches SGT for each candidate current/speed combination;
+        returns the best overall result plus the full result table.
+        Walks incrementally from baseline_sgt if given (see
+        walk_from_baseline), otherwise sweeps the full range blindly
+        (only happens when there's no known-working value to anchor
+        to, e.g. a fresh printer)."""
         all_results = []
         try:
             for current in currents:
                 for homing_speed in homing_speeds:
-                    all_results.extend(
-                        self.sweep(sgt_min, sgt_max, sgt_step, current,
-                                   homing_speed, samples))
+                    if baseline_sgt is not None:
+                        all_results.extend(self.walk_from_baseline(
+                            baseline_sgt, sgt_min, sgt_max, sgt_step,
+                            current, homing_speed, samples, max_drift))
+                    else:
+                        all_results.extend(
+                            self.sweep(sgt_min, sgt_max, sgt_step, current,
+                                       homing_speed, samples))
         finally:
             self.restore_homing_speed()
         # Prefer fully-reliable results, then best (lowest) score among
@@ -377,6 +433,8 @@ class KAST:
         self.default_samples = config.getint('samples', 5, minval=1)
         self.default_sgt_step = config.getint('sgt_step', 8, minval=1)
         self.default_sgt_radius = config.getint('sgt_radius', 16, minval=1)
+        self.default_max_drift = config.getfloat(
+            'max_position_drift', 2.0, above=0.0)
         self.results_dir = os.path.expanduser(
             config.get('results_dir', '~/printer_data/config/kast_results'))
         self.enable_plots = config.getboolean('enable_plots', True)
@@ -471,6 +529,8 @@ class KAST:
         speed_min = gcmd.get_float('HOMING_SPEED_MIN', None, above=0.0)
         speed_max = gcmd.get_float('HOMING_SPEED_MAX', None, above=0.0)
         speed_step = gcmd.get_float('HOMING_SPEED_STEP', 5.0, above=0.0)
+        max_drift = gcmd.get_float('MAX_DRIFT', self.default_max_drift,
+                                    above=0.0)
 
         if self.fun_mode:
             gcmd.respond_info(
@@ -541,13 +601,22 @@ class KAST:
             ((sgt_max - sgt_min) // sgt_step + 1)
             * len(currents) * len(homing_speeds) * samples)
         gcmd.respond_info(
-            "KAST: sweeping SGT %d..%d for '%s' (~%d homing moves). This "
-            "can take a while and will heat up the motor -- interrupt "
-            "with an emergency stop if something looks wrong."
+            "KAST: sweeping SGT %d..%d for '%s' (up to ~%d homing moves, "
+            "fewer if it stops early on an unreliable step). This can "
+            "take a while and will heat up the motor -- interrupt with "
+            "an emergency stop if something looks wrong."
             % (sgt_min, sgt_max, stepper_name, total_trials))
 
-        best, all_results = tuner.search(
-            sgt_min, sgt_max, sgt_step, currents, homing_speeds, samples)
+        try:
+            best, all_results = tuner.search(
+                sgt_min, sgt_max, sgt_step, currents, homing_speeds,
+                samples, baseline_sgt=current_sgt, max_drift=max_drift)
+        except KASTUnsafeAbort as e:
+            raise gcmd.error(
+                "KAST_CALIBRATE stopped: %s\nNothing further was moved. "
+                "Whatever was tested up to this point is not saved; "
+                "consider a smaller SGT_STEP or investigating the "
+                "endstop/wiring for that axis before retrying." % e)
 
         self.last_results[stepper_name] = {
             'best': best,
