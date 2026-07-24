@@ -100,14 +100,19 @@ class KASTDriverAdapter:
         on a known-working value instead of blindly walking the full
         theoretical range, which can mean testing much harsher
         settings than the printer has ever actually seen."""
-        configfile = self.printer.lookup_object('configfile')
-        section = configfile.status_settings_dict.get(self.driver_name, {})
-        val = section.get(self.config_key.lower())
-        if val is None:
-            return None
         try:
+            configfile = self.printer.lookup_object('configfile')
+            section = configfile.validate.status_settings.get(
+                self.driver_name.lower(), {})
+            val = section.get(self.config_key.lower())
+            if val is None:
+                return None
             return int(float(val))
-        except (TypeError, ValueError):
+        except (AttributeError, TypeError, ValueError) as e:
+            logging.warning(
+                "KAST: could not read configured %s for '%s': %s "
+                "(falling back to the driver's full sweep range)",
+                self.config_key, self.stepper_name, e)
             return None
 
     def _find_driver(self):
