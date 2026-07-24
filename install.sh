@@ -86,8 +86,22 @@ info "linked macros/kast.cfg -> $MACRO_LINK"
 
 PRINTER_CFG="$CONFIG_DIR/printer.cfg"
 if [ -f "$PRINTER_CFG" ] && ! grep -q "kast-macros.cfg" "$PRINTER_CFG"; then
-    printf '\n[include kast-macros.cfg]\n' >> "$PRINTER_CFG"
-    info "added [include kast-macros.cfg] to printer.cfg"
+    # Klipper requires its auto-generated "#*# <---- SAVE_CONFIG ---->"
+    # block to be the last thing in the file (that's where saved
+    # calibration data like bed mesh / PID / Z-offset lives). Appending
+    # after it breaks that and corrupts the saved data, so insert the
+    # include before that marker if it exists, otherwise it's safe to
+    # just append at the end.
+    if grep -q '^#\*# <---' "$PRINTER_CFG"; then
+        awk -v inc='[include kast-macros.cfg]' '
+            !done && /^#\*# <---/ { print inc; print ""; done=1 }
+            { print }
+        ' "$PRINTER_CFG" > "$PRINTER_CFG.kast.tmp" && mv "$PRINTER_CFG.kast.tmp" "$PRINTER_CFG"
+        info "inserted [include kast-macros.cfg] before the SAVE_CONFIG block in printer.cfg"
+    else
+        printf '\n[include kast-macros.cfg]\n' >> "$PRINTER_CFG"
+        info "added [include kast-macros.cfg] to printer.cfg"
+    fi
 elif [ ! -f "$PRINTER_CFG" ]; then
     warn "no printer.cfg found at $PRINTER_CFG, add '[include kast-macros.cfg]' yourself"
 fi

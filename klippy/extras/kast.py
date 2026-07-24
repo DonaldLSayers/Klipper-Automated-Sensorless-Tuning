@@ -620,5 +620,5 @@ class KAST:
             "and restart." % (", ".join(applied), stepper_name))
 
 
-def load_config_prefix(config):
+def load_config(config):
     return KAST(config)
