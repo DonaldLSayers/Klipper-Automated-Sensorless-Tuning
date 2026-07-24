@@ -581,7 +581,11 @@ class KAST:
         accel_chip = config.get('accel_chip', 'default')
         self.accel = KASTAccelHelper(self.printer, accel_chip)
         self.default_samples = config.getint('samples', 5, minval=1)
-        self.default_sgt_step = config.getint('sgt_step', 8, minval=1)
+        # 1, not 8: with the old G28-based method every step was a
+        # real homing cycle, so a coarse default limited wear/risk.
+        # Safe-zone testing has no such cost, so default to testing
+        # every single value instead of skipping most of them.
+        self.default_sgt_step = config.getint('sgt_step', 1, minval=1)
         self.default_sgt_radius = config.getint('sgt_radius', 16, minval=1)
         # KAST_CALIBRATE tests near bed center rather than searching a
         # real endstop: a false StallGuard trigger there just stops

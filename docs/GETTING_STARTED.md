@@ -71,7 +71,7 @@ Also check `variable_prelift_z` (default 4mm). KAST's `[homing_override]` lifts 
 [kast]
 accel_chip: default
 samples: 5
-sgt_step: 8
+sgt_step: 1
 fun_mode: true
 results_dir: ~/printer_data/config/kast_results
 enable_plots: true

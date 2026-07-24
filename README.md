@@ -48,7 +48,7 @@ Optional parameters:
 | `AXIS` | last char of `STEPPER` | Axis letter to test (`x`/`y`) |
 | `SGT_MIN` / `SGT_MAX` | see below | Search range for the stall-sensitivity field |
 | `SGT_RADIUS` | `16` (config `sgt_radius`) | How far past the currently configured SGT the default search explores, in the more-sensitive direction only |
-| `SGT_STEP` | `8` (config `sgt_step`) | Step size across the search |
+| `SGT_STEP` | `1` (config `sgt_step`) | Step size across the search. Cheap to test every value since there's no real endstop involved, widen it if you specifically want a coarser/faster search |
 | `SAMPLES` | `5` (config `samples`) | Test cycles per candidate |
 | `CURRENT_MIN` / `CURRENT_MAX` | unset | Also sweep current (amps) over this range |
 | `CURRENT_STEP` | `0.1` | Step size for the current sweep |
