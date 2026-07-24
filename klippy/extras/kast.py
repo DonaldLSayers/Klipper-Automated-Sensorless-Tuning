@@ -369,9 +369,10 @@ class KASTStepperTuner:
 
     def celebrate(self, sgt, current):
         if self.kast.fun_mode:
-            self.gcode.respond_info(
-                "Found a good spot! SGT=%s CURRENT=%.2fA. Nice." %
-                (sgt, current))
+            msg = "Found a good spot! SGT=%s" % sgt
+            if current is not None:
+                msg += " CURRENT=%.2fA" % current
+            self.gcode.respond_info(msg + ". Nice.")
 
     _boop_i = 0
 
@@ -458,7 +459,8 @@ class KASTStepperTuner:
             roughness, (ok, pos, err) = self.accel.measure(test_fn)
             if ok:
                 successes += 1
-                positions.append(pos)
+                if pos is not None:
+                    positions.append(pos)
                 if roughness is not None:
                     roughness_vals.append(roughness)
             else:
